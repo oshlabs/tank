@@ -5,27 +5,40 @@ defmodule Tank.Reconciler do
   `Tank.apply/1` a pod and the reconciler starts it — you never start a
   container imperatively.
 
-  Each pass reads `Tank.Store.list_pods/0`, diffs it against what's running
+  Each pass reads `Tank.Store.list_pods/0`, diffs it against what's tracked
   (`Tank.Reconciler.Plan`), and actuates:
 
-    * desired ∧ ¬running            → start a `Tank.Runtime` under the loop's
+    * desired ∧ ¬tracked            → start a `Tank.Runtime` under the loop's
       `DynamicSupervisor`,
-    * running ∧ ¬desired            → stop it,
-    * running ∧ desired-but-changed → restart it.
+    * tracked ∧ ¬desired            → stop it,
+    * tracked ∧ desired-but-changed → restart it with the new spec.
 
-  Resync runs on a timer (the *truth* — manual drift, crashes, and reboots are
-  corrected on the next pass) and can be woken early by `nudge/0` (the write
-  path calls it, debounced, for low latency). Runtimes are started `:temporary`
-  so the reconciler — not the supervisor — owns restart decisions (crash
-  handling with backoff lands in a later slice; for now a crashed pod is simply
-  restarted on the next resync).
+  Resync runs on a timer (the *truth* — drift, crashes, reboots are corrected on
+  the next pass) and can be woken early by `nudge/0` (the write path calls it,
+  debounced). Runtimes are started `:temporary`, so the reconciler — not the
+  supervisor — owns restart.
+
+  ## Crash handling
+
+  Each pod carries a status: `:running`, `:backing_off`, or `:terminal`. When a
+  runtime exits unexpectedly, the loop honours the pod's `:restart` policy
+  (`:always`; `:on_failure` only on an abnormal exit; `:never`):
+
+    * restartable → wait `min(base · 2ⁿ, cap)` then restart (status
+      `:backing_off`); `n` resets after a stable run, so a crash loop backs off
+      while an occasional crash recovers fast.
+    * not restartable → status `:terminal`; resync leaves it stopped (until its
+      spec changes or it is deleted).
 
   ## Options
 
-    * `:runtime` — the runtime module (default `Tank.Runtime`); injectable for
-      tests.
+    * `:runtime` — the runtime module (default `Tank.Runtime`); injectable for tests.
     * `:owner` — forwarded to each runtime's `:owner` (default: none).
     * `:interval` — resync period in ms (default 5000).
+    * `:backoff_base` / `:backoff_cap` — restart backoff bounds in ms
+      (defaults 10_000 / 300_000, per the PLAN).
+    * `:stable_window` — a run lasting at least this long (ms) resets the
+      backoff (default 600_000).
     * `:name` — GenServer name (default `Tank.Reconciler`).
   """
 
@@ -34,9 +47,6 @@ defmodule Tank.Reconciler do
 
   alias Tank.{Pod, Store}
   alias Tank.Reconciler.Plan
-
-  @default_interval :timer.seconds(5)
-  @debounce 100
 
   # === API ==================================================================
 
@@ -66,6 +76,10 @@ defmodule Tank.Reconciler do
   @spec running(GenServer.server()) :: %{optional(String.t()) => pid()}
   def running(server \\ __MODULE__), do: GenServer.call(server, :running)
 
+  @doc "Each tracked pod's `%{status:, retries:}`. Mainly for introspection/tests."
+  @spec status(GenServer.server()) :: %{optional(String.t()) => map()}
+  def status(server \\ __MODULE__), do: GenServer.call(server, :status)
+
   # === lifecycle ============================================================
 
   @impl true
@@ -76,13 +90,16 @@ defmodule Tank.Reconciler do
       sup: sup,
       runtime: Keyword.get(opts, :runtime, Tank.Runtime),
       owner: Keyword.get(opts, :owner),
-      interval: Keyword.get(opts, :interval, @default_interval),
-      running: %{},
+      interval: Keyword.get(opts, :interval, :timer.seconds(5)),
+      backoff_base: Keyword.get(opts, :backoff_base, :timer.seconds(10)),
+      backoff_cap: Keyword.get(opts, :backoff_cap, :timer.minutes(5)),
+      stable_window: Keyword.get(opts, :stable_window, :timer.minutes(10)),
       timer: nil,
-      debounce: nil
+      debounce: nil,
+      # name => %{pod, status, pid, ref, retries, start_at, restart_timer}
+      pods: %{}
     }
 
-    # First pass fires as soon as init returns, then the periodic timer.
     {:ok, schedule(state, 0)}
   end
 
@@ -91,12 +108,24 @@ defmodule Tank.Reconciler do
     {:noreply, schedule(reconcile(%{state | debounce: nil}), state.interval)}
   end
 
-  # A runtime went down. If we stopped it, we've already demonitored; so this is
-  # an unexpected exit — drop it, and the next resync restarts it if still
-  # desired.
-  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
-    running = for {name, info} <- state.running, info.ref != ref, into: %{}, do: {name, info}
-    {:noreply, %{state | running: running}}
+  # A runtime exited on its own (we demonitor before any intentional stop, so
+  # this is always unexpected). Honour the restart policy.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    case find_by_ref(state.pods, ref) do
+      nil -> {:noreply, state}
+      {name, entry} -> {:noreply, %{state | pods: on_exit(name, entry, reason, state)}}
+    end
+  end
+
+  # A backoff timer fired: restart the pod if it is still backing off.
+  def handle_info({:restart, name}, state) do
+    case state.pods[name] do
+      %{status: :backing_off, pod: pod, retries: retries} ->
+        {:noreply, %{state | pods: do_start(pod, retries, state.pods, state)}}
+
+      _ ->
+        {:noreply, state}
+    end
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -104,7 +133,7 @@ defmodule Tank.Reconciler do
   @impl true
   def handle_cast(:nudge, state) do
     if state.debounce, do: Process.cancel_timer(state.debounce)
-    {:noreply, %{state | debounce: Process.send_after(self(), :resync, @debounce)}}
+    {:noreply, %{state | debounce: Process.send_after(self(), :resync, 100)}}
   end
 
   @impl true
@@ -113,40 +142,55 @@ defmodule Tank.Reconciler do
   end
 
   def handle_call(:running, _from, state) do
-    {:reply, Map.new(state.running, fn {name, info} -> {name, info.pid} end), state}
+    running = for {name, %{status: :running, pid: pid}} <- state.pods, into: %{}, do: {name, pid}
+    {:reply, running, state}
+  end
+
+  def handle_call(:status, _from, state) do
+    status =
+      Map.new(state.pods, fn {name, e} -> {name, %{status: e.status, retries: e.retries}} end)
+
+    {:reply, status, state}
   end
 
   # === the pass =============================================================
 
   defp reconcile(state) do
-    running_specs = Map.new(state.running, fn {name, info} -> {name, info.pod} end)
-    plan = Plan.diff(Store.list_pods(), running_specs)
+    plan = Plan.diff(Store.list_pods(), tracked_specs(state.pods))
 
-    running =
-      state.running
-      |> stop_all(plan.stop ++ Enum.map(plan.restart, & &1.name), state)
-      |> start_all(plan.start ++ plan.restart, state)
+    pods =
+      state.pods
+      |> stop_pods(plan.stop ++ Enum.map(plan.restart, & &1.name), state)
+      |> start_pods(plan.restart ++ plan.start, state)
 
-    %{state | running: running}
+    %{state | pods: pods}
   end
 
-  defp stop_all(running, names, state), do: Enum.reduce(names, running, &stop_pod(&1, &2, state))
+  defp tracked_specs(pods), do: Map.new(pods, fn {name, e} -> {name, e.pod} end)
 
-  defp stop_pod(name, running, state) do
-    case Map.pop(running, name) do
-      {nil, running} ->
-        running
+  defp stop_pods(pods, names, state), do: Enum.reduce(names, pods, &stop_pod(&1, &2, state))
 
-      {info, running} ->
-        Process.demonitor(info.ref, [:flush])
-        DynamicSupervisor.terminate_child(state.sup, info.pid)
-        running
+  defp stop_pod(name, pods, state) do
+    case Map.pop(pods, name) do
+      {nil, pods} -> pods
+      {entry, pods} -> teardown(entry, state) && pods
     end
   end
 
-  defp start_all(running, pods, state), do: Enum.reduce(pods, running, &start_pod(&1, &2, state))
+  defp teardown(entry, state) do
+    if entry.ref, do: Process.demonitor(entry.ref, [:flush])
+    if entry.restart_timer, do: Process.cancel_timer(entry.restart_timer)
 
-  defp start_pod(%Pod{} = pod, running, state) do
+    if entry.status == :running and is_pid(entry.pid),
+      do: DynamicSupervisor.terminate_child(state.sup, entry.pid)
+
+    true
+  end
+
+  defp start_pods(pods, specs, state),
+    do: Enum.reduce(specs, pods, fn pod, acc -> do_start(pod, 0, acc, state) end)
+
+  defp do_start(%Pod{} = pod, retries, pods, state) do
     child =
       Supervisor.child_spec({state.runtime, {pod, [owner: state.owner]}},
         id: {state.runtime, pod.name},
@@ -155,16 +199,71 @@ defmodule Tank.Reconciler do
 
     case DynamicSupervisor.start_child(state.sup, child) do
       {:ok, pid} ->
-        Map.put(running, pod.name, %{pid: pid, ref: Process.monitor(pid), pod: pod})
+        entry = %{
+          pod: pod,
+          status: :running,
+          pid: pid,
+          ref: Process.monitor(pid),
+          retries: retries,
+          start_at: now(),
+          restart_timer: nil
+        }
+
+        Map.put(pods, pod.name, entry)
 
       {:error, reason} ->
+        # Leave it untracked; the next resync retries the start.
         Logger.error("Tank.Reconciler: failed to start pod #{pod.name}: #{inspect(reason)}")
-        running
+        Map.delete(pods, pod.name)
     end
+  end
+
+  # === crash handling =======================================================
+
+  defp on_exit(name, entry, reason, state) do
+    if restart?(entry.pod, reason) do
+      # A run that lasted the stable window resets the backoff to base (2⁰).
+      n = if stable?(entry, state), do: 0, else: entry.retries
+      delay = min(state.backoff_base * Integer.pow(2, n), state.backoff_cap)
+      timer = Process.send_after(self(), {:restart, name}, delay)
+
+      Map.put(state.pods, name, %{
+        entry
+        | status: :backing_off,
+          pid: nil,
+          ref: nil,
+          retries: n + 1,
+          restart_timer: timer
+      })
+    else
+      Map.put(state.pods, name, %{
+        entry
+        | status: :terminal,
+          pid: nil,
+          ref: nil,
+          restart_timer: nil
+      })
+    end
+  end
+
+  defp stable?(%{start_at: start_at}, state),
+    do: now() - (start_at || now()) >= state.stable_window
+
+  defp restart?(%Pod{restart: :always}, _reason), do: true
+  defp restart?(%Pod{restart: :on_failure}, :normal), do: false
+  defp restart?(%Pod{restart: :on_failure}, _reason), do: true
+  defp restart?(%Pod{restart: :never}, _reason), do: false
+
+  # === helpers ==============================================================
+
+  defp find_by_ref(pods, ref) do
+    Enum.find_value(pods, fn {name, entry} -> if entry.ref == ref, do: {name, entry} end)
   end
 
   defp schedule(state, delay) do
     if state.timer, do: Process.cancel_timer(state.timer)
     %{state | timer: Process.send_after(self(), :resync, delay)}
   end
+
+  defp now, do: System.monotonic_time(:millisecond)
 end
