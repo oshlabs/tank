@@ -117,9 +117,8 @@ defmodule Tank.Container do
   @impl true
   # The workload is parked at the checkpoint: its namespace exists but it has
   # not exec'd. Configure the namespace from the host, then let it proceed.
-  def handle_info({:linx_process, :ready, _child_pid}, state) do
-    with {:ok, host_pid} <- Workload.host_pid(state.session),
-         :ok <- configure_network(host_pid, Map.get(state.spec, :network, %{})),
+  def handle_info({:linx_process, :ready, host_pid}, state) do
+    with :ok <- configure_network(host_pid, Map.get(state.spec, :network, %{})),
          :ok <- Workload.proceed(state.session) do
       {:noreply, %{state | host_pid: host_pid}}
     else
