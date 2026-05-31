@@ -59,11 +59,11 @@ A small set of composable modules, each with one job.
 | Module | Role |
 | --- | --- |
 | `Tank.Image.*` | Pull + assemble an OCI/Docker image into a rootfs (lifted from Silo). |
-| `Tank.Pod`, `Tank.Container`, `Tank.Pod.Network`, `Tank.Volume` | The desired-state structs — what *should* run. |
+| `Tank.Pod`, `Tank.Container`, `Tank.Pod.Network`, `Tank.Nic`, `Tank.Volume` | The desired-state structs — what *should* run. |
 | `Tank.Store` | The Khepri seam: own the `[:tank, …]` subtree, project it to ETS, BYO-store-or-default. |
 | `Tank.Runtime` (a.k.a. `Tank.Pod.Runner`) | The actuator: turn one pod spec into running reality on Linx. |
 | `Tank.Reconciler` | The control loop: converge observed reality toward the desired set; restart with backoff. |
-| `Tank.Host` | The host-config seam: DNS servers, uplink interface, host IP facts (VintageNet now, Linx later). |
+| `Tank.Host` | The host-config seam (a behaviour): uplink, DNS, host IP facts. `Tank.Host.Static` default; VintageNet/Linx adapters plug in. |
 | `Tank` | Top-level API (`pod/2`, `apply/1`, `delete/1`) + the supervision tree. |
 
 The seam between **mechanism** (Linx) and **policy** (Tank) is strict; the seam
@@ -97,13 +97,22 @@ ConfigMap/Secret indirection, Services, QoS, probes-as-mandatory).
   limits: %{memory: 256 <<< 20, pids: 100, cpu: {50_000, 100_000}}
 }
 
+# The pod is one netns, but a netns holds any number of interfaces:
 %Tank.Pod.Network{
-  mode: :macvlan,        # :macvlan (v1) | :bridge (later) | :host | :none
-  parent: "eth0",        # uplink NIC — a shared host fact; :auto resolves via Tank.Host
-  ip: :dhcp,             # :dhcp | {"10.0.0.5", 24} | :link_local
-  gateway: nil,          # for static addressing
-  dns: :inherit          # :inherit host DNS, or an explicit list
+  nics: [
+    %Tank.Nic{name: "eth0", mode: :macvlan, parent: "eth0",
+              ip: {"10.0.0.5", 24}, gateway: "10.0.0.1"},
+    %Tank.Nic{name: "eth1", mode: :macvlan, parent: "eth1",
+              ip: {"192.168.5.5", 24}}
+  ],
+  dns: ["10.0.0.1"]      # pod-level: one /etc/resolv.conf per netns
 }
+# loopback is always raised. `mode:` is per-NIC: :macvlan (v1) | :bridge/:ipvlan
+# (later). `parent:` is the uplink (a shared host fact; :auto resolves via
+# Tank.Host). `ip:` is {addr, prefix} static (v1); :dhcp comes later.
+#
+# `network:` may also be the simple whole-netns atoms :host (share the host's
+# network namespace) or :none (isolated netns, loopback only).
 ```
 
 **Image config → run parameters** follows the OCI spec: `args = command ||
@@ -137,11 +146,45 @@ lifecycle or cluster membership — those are application/host concerns:
 [:tank, :pods, "db"]    -> serialized %Tank.Pod{}
 ```
 
-`config/runtime.exs` **seeds** the subtree idempotently at boot; the runtime API
-(`Tank.apply/1` / `Tank.delete/1`) writes it thereafter. The reconciler reads
-desired state through a **`khepri_projection`** mirroring `[:tank, :pods, **]`
-into ETS: fast local reads, change notifications to wake the loop, and a full
-projection read for the level-triggered resync.
+**Khepri is the source of truth.** `config/runtime.exs` only *bootstraps* the
+subtree: on a fresh device Tank writes the configured pods *create-if-absent*,
+so the boot seed never clobbers state changed at runtime, and runtime changes
+persist across reboots. Config is a starting point, not a live mirror — removing
+a pod is `Tank.delete/1`, not deleting it from config. (A later `managed_by`
+ownership tag — the same three-way `last_applied` trick Linx's reconciler uses —
+could let config-owned pods reconcile from config each boot while runtime-owned
+pods persist; deferred.)
+
+The runtime API (`Tank.apply/1` / `Tank.delete/1`) writes the `[:tank, :pods, …]`
+subtree thereafter, and **every write auto-propagates to reality**: it updates
+the projection, which wakes the reconciler, which diffs desired against running
+and starts/stops/restarts pods to match. You never imperatively start a
+container — you state intent in Khepri and the loop converges. This is exactly
+the Kubernetes shape: writes land in etcd, the kubelet watches and reconciles —
+Tank collapses the two, Khepri *is* etcd and `Tank.Reconciler` *is* the kubelet.
+
+The reconciler reads desired state through a **`khepri_projection`** mirroring
+`[:tank, :pods, **]` into ETS: fast local reads, change notifications to wake the
+loop, and a full projection read for the level-triggered resync.
+
+## Operational config — where Tank keeps its stuff
+
+Distinct from desired state ("what pods"), operational config is "where Tank
+keeps its stuff" — plain Application env / `runtime.exs`:
+
+    config :tank, data_dir: "/var/lib/tank"   # images/, volumes/, run/ live here
+
+On a laptop this defaults to a user cache dir (e.g. `~/.cache/tank`). The
+Khepri/Ra data dir specifically is owned by the *consumer* (TankOS sets it
+on-device, flash-wear aware); standalone Tank's default store gets a dir under
+`data_dir`.
+
+**Volume vs mount.** A `%Tank.Container{}` mount `path` is the container-side
+mountpoint — always absolute (it is a path inside the rootfs). Its *source* is a
+pod-level `%Tank.Volume{}`: either a **named volume** (Tank allocates
+`<data_dir>/volumes/<name>` — relative to the configured root, Tank-managed) or
+an explicit **host path** (an absolute host directory, bind-mounted — the escape
+hatch).
 
 ## The reconcile loop
 
@@ -198,21 +241,22 @@ Linx, and fix them there, not paper over them in Tank.
 
 ## Networking
 
-**macvlan on the uplink** is the v1 default and the opinionated choice: the
-container gets its own MAC and a real LAN IP (static, or its own DHCP), no
-bridge, no NAT, no nftables, and the link dies with the netns — so there is no
-allocation or teardown state to manage. The container is a first-class host on
-the LAN, which is the natural embedded-device model. All of it is
-`Linx.Netlink.Rtnl`: create the macvlan on the host NIC, move it into the pod's
-netns as `eth0`, address it and add the default route — driven in the checkpoint
-window, reusing `Rtnl.Reconcile`.
+**macvlan on the uplink** is the v1 default and the opinionated choice: a
+container interface gets its own MAC and a real LAN IP — **static in v1**, its
+own DHCP later — with no bridge, no NAT, no nftables, and the link dies with the
+netns, so there is no allocation or teardown state to manage. The container is a
+first-class host on the LAN, the natural embedded-device model. All of it is
+`Linx.Netlink.Rtnl`: create each macvlan on its host uplink, move it into the
+pod's netns under its `%Tank.Nic{}` name, address it and add routes — driven in
+the checkpoint window, reusing `Rtnl.Reconcile`. A pod's netns can hold several
+nics (e.g. one per uplink); loopback is always raised; DNS is pod-level.
 
-The `%Tank.Pod.Network{}` `mode` discriminant is the extensibility seam:
-**bridge+NAT** (many pods behind a host bridge with port publishing, via
-`Linx.Netfilter`) slots in later as another mode without reshaping the API.
-`:host` (share the host network) and `:none` (isolated netns, loopback only)
-round out the set. A **DHCP-client-in-netns** (for images that cannot address
-themselves) is a later Linx-side addition.
+Each `%Tank.Nic{}`'s `mode` is the extensibility seam: **bridge+NAT** (many pods
+behind a host bridge with port publishing, via `Linx.Netfilter`) slots in later
+as another mode without reshaping the API. `:host` (share the host network) and
+`:none` (isolated netns, loopback only) are the whole-netns shortcuts. A
+**DHCP-client-in-netns** (for images that cannot address themselves) is a later
+Linx-side addition.
 
 > Note: macvlan is commonly refused on Wi-Fi uplinks by the AP; on Wi-Fi-only
 > devices the bridge mode (later) or `:host` is the path. Worth validating per
@@ -220,23 +264,31 @@ themselves) is a later Linx-side addition.
 
 ## Host-config sharing
 
-TankOS owns host networking (today via **VintageNet**; eventually a Linx-based
-stack, then a native Elixir DHCP client/server). Tank must *share certain
-aspects* without owning them. `Tank.Host` is that seam — a small adapter
-exposing:
+Tank must *share certain aspects* of host networking without owning them — and
+without dragging in any Nerves dependency, because Tank must also run standalone
+on a plain Linux laptop. So `Tank.Host` is a **behaviour** (an adapter
+contract), and **Tank core has zero compile-time dependency on VintageNet or
+anything Nerves**. The contract exposes:
 
 - the **uplink interface** name (the macvlan parent; resolves `parent: :auto`),
-- the host **DNS servers** (for `dns: :inherit` and the container's
-  `/etc/resolv.conf`),
+- the host **DNS servers** (for the container's `/etc/resolv.conf`),
 - host **IP/connection facts** (snapshot + change notifications).
 
-It is **VintageNet-backed now** — read its PropertyTable
-(`["interface", ifname, "addresses"]`, `["name_servers"]`,
-`["interface", ifname, "connection"]`) and subscribe to its
-`{VintageNet, property, old, new, meta}` events — and **Linx-backed later**,
-behind the *same* interface, so nothing on the Tank side changes when TankOS
-replaces VintageNet. Tank never configures the host's uplink; it only reads it
-and builds container networking off it.
+Adapters:
+
+- **`Tank.Host.Static`** — shipped in Tank, the v1 default: uplink + DNS read
+  straight from config. Runs anywhere, laptop included.
+- **`Tank.Host.VintageNet`** — lives in **TankOS** (or a tiny optional sibling
+  package), never in Tank's deps. Reads VintageNet's PropertyTable
+  (`["interface", ifname, "addresses"]`, `["name_servers"]`,
+  `["interface", ifname, "connection"]`) and subscribes to its
+  `{VintageNet, property, old, new, meta}` events.
+- **`Tank.Host.Linx`** *(later)* — auto-detect uplink + DNS from rtnetlink and
+  `/etc/resolv.conf`; a zero-config Linux/laptop default.
+
+All behind the same behaviour, so nothing on the Tank side changes when the
+consumer swaps adapters. Tank never configures the host's uplink; it only reads
+it and builds container networking off it.
 
 ## TankOS (the consumer, out of tree)
 
@@ -251,6 +303,12 @@ responsibilities, kept out of the Tank library:
 
 Tank stays liftable into its own repository: `git mv tank ../tank` plus flipping
 `{:linx, path: ".."}` to `{:linx, "~> x.y"}`.
+
+**Standalone, off Nerves.** Tank is a first-class standalone app — the primary
+dev loop is a plain Linux laptop, not a device. There it starts its own default
+Khepri store, uses `Tank.Host.Static`, and runs as root for namespaces / mounts
+/ netlink via the repo's `./sudorun.sh` (root `iex -S mix`) and `./sudotest.sh`
+(root test run), mirroring Linx's scripts.
 
 ## Milestones
 
@@ -270,12 +328,14 @@ on top.
   `[:tank, …]` subtree, the ETS projection); seeding from `runtime.exs`. Adds
   the `khepri` dependency.
 - **M4 — `Tank.Runtime` actuator + macvlan.** One pod spec → running reality:
-  pull → spawn → rootfs setup → macvlan network → cgroup limits → proceed.
-  Reuses `Rtnl.Reconcile` / `Cgroup.Reconcile`.
+  pull → spawn → rootfs setup → macvlan network (**static IPs**) → cgroup limits
+  → proceed. A pod's netns may hold several `%Tank.Nic{}`. Reuses
+  `Rtnl.Reconcile` / `Cgroup.Reconcile`.
 - **M5 — `Tank.Reconciler`.** The control loop over the Khepri projection;
   start/stop/restart; exponential backoff; self-healing; level-triggered resync.
-- **M6 — `Tank.Host` seam.** VintageNet-backed host facts (uplink, DNS, IP);
-  `parent: :auto`; `dns: :inherit`.
+- **M6 — `Tank.Host` seam.** The `Tank.Host` behaviour + `Tank.Host.Static`
+  default (uplink + DNS from config); `parent: :auto`. VintageNet/Linx adapters
+  are consumer-side / later.
 - **M7 — Multi-container pods.** Sidecars sharing the pod's netns and lifetime.
 
 **Later (post-graduation):** bridge+NAT networking (`Linx.Netfilter`),
