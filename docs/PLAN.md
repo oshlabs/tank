@@ -1,0 +1,305 @@
+# Tank — plan
+
+Tank is an opinionated, single-node (growing to multi-node) **declarative
+container orchestrator** for the BEAM, built entirely on Linx's public API and
+designed to be embedded in **TankOS**, a Nerves device OS. You describe the
+containers that must run — with their network, resources, and restart policy —
+as Elixir data; Tank reconciles the device toward that desired state and keeps
+it there across drift, crashes, and reboots.
+
+This document is the *why* and the *route*. It is a living plan: as milestones
+land, the milestone section is updated, and design decisions that get settled
+move into the relevant moduledocs.
+
+## The one-paragraph pitch
+
+Think of how Kubernetes defines pods that must run — but single-node, no API
+server, no YAML, no pluggable CNI, and expressed in idiomatic Elixir. The
+desired state lives in **Khepri** (a Raft-backed tree store), seeded at boot and
+mutable at runtime. A reconcile loop — built on the `Linx.Reconcile` machinery —
+converges the node's reality toward it. Containers run from real OCI/Docker
+images on Linx's kernel primitives. Tank is deliberately *opinionated*: it makes
+the embedded-device choices (macvlan networking, root-remap hardening, a single
+consistent state tree) so the consumer doesn't assemble a runtime from parts.
+
+## Lineage: Silo → Linx → Tank
+
+- **Silo** (`~/src/silo`) was the monolithic ancestor: it bundled the kernel
+  primitives (`Silo.Netlink`, the `silo-init` port, `Silo.Cgroup`) *and* an OCI
+  image puller *and* the container orchestration in one app.
+- **Linx** extracted and generalized the primitive layer: `Linx.Process`
+  (≈ `silo-init`), `Linx.Netlink.Rtnl` (≈ `Silo.Netlink`), `Linx.Cgroup`,
+  `Linx.Mount`, `Linx.User`, `Linx.Seccomp`, `Linx.Capabilities`, `Linx.Sysctl`,
+  plus the new declarative `Linx.Reconcile` machinery.
+- **Tank** is the orchestrator that `Silo.Container` / `Silo.run` once were —
+  rebuilt cleanly *on top of* Linx, declaratively, with reconciliation, and with
+  a persistent state store from day one.
+
+Tank reaches **only Linx's public API** (a path dependency now, a hex dependency
+once lifted). If Tank ever needs something Linx doesn't expose, that is a real
+gap in the primitives — surfaced here, fixed in Linx. This is Tank's standing
+charter and its value as Linx's acceptance test.
+
+### What lifts from Silo essentially unchanged
+
+`Silo.Image`, `Silo.Image.Registry`, `Silo.Image.Tar`, `Silo.Image.User` are
+**pure Elixir** — they depend only on `req`, `:crypto`, and `:zlib`; no native
+code, no netlink. They move into `Tank.Image.*` with a rename and a `req`
+dependency. They already cover: anonymous bearer-token auth from the
+`WWW-Authenticate` challenge, multi-arch index/manifest selection by host arch,
+blob fetch + sha256 verification, a content-addressed cache, a hand-rolled
+ustar/GNU/PAX tar reader (because `:erl_tar` refuses the absolute symlinks a
+rootfs needs), OCI whiteout stacking, and `User` resolution against the rootfs's
+own `/etc/passwd`/`/etc/group`.
+
+## Architecture
+
+A small set of composable modules, each with one job.
+
+| Module | Role |
+| --- | --- |
+| `Tank.Image.*` | Pull + assemble an OCI/Docker image into a rootfs (lifted from Silo). |
+| `Tank.Pod`, `Tank.Container`, `Tank.Pod.Network`, `Tank.Volume` | The desired-state structs — what *should* run. |
+| `Tank.Store` | The Khepri seam: own the `[:tank, …]` subtree, project it to ETS, BYO-store-or-default. |
+| `Tank.Runtime` (a.k.a. `Tank.Pod.Runner`) | The actuator: turn one pod spec into running reality on Linx. |
+| `Tank.Reconciler` | The control loop: converge observed reality toward the desired set; restart with backoff. |
+| `Tank.Host` | The host-config seam: DNS servers, uplink interface, host IP facts (VintageNet now, Linx later). |
+| `Tank` | Top-level API (`pod/2`, `apply/1`, `delete/1`) + the supervision tree. |
+
+The seam between **mechanism** (Linx) and **policy** (Tank) is strict; the seam
+between **desired state** (`Tank.Pod` structs in Khepri) and **actuation**
+(`Tank.Runtime` driving Linx) is the reconcile boundary.
+
+## The desired-state model
+
+Borrow PodSpec's *field names* where they read well; trim hard to the
+single-node subset; drop everything scheduler- or cluster-coupled (affinity,
+ConfigMap/Secret indirection, Services, QoS, probes-as-mandatory).
+
+```elixir
+%Tank.Pod{
+  name: "web",                       # unique key; the Khepri path leaf
+  containers: [%Tank.Container{}],   # 1+, sharing one network namespace
+  network: %Tank.Pod.Network{},      # pod-level (the netns is the pod)
+  volumes: [%Tank.Volume{}],         # pod-level; mounted into containers
+  restart: :always                   # :always | :on_failure | :never
+}
+
+%Tank.Container{
+  name: "app",
+  image: "nginx:1.27",               # OCI ref; or {:rootfs, path} escape hatch
+  command: ["/usr/sbin/nginx"],      # overrides the image Entrypoint
+  args: ["-g", "daemon off;"],       # overrides the image Cmd
+  env: %{"TZ" => "UTC"},             # merged over the image Env
+  working_dir: "/",                  # overrides the image WorkingDir
+  user: "nginx",                     # name or uid[:gid], resolved in the rootfs
+  mounts: [%{volume: "data", path: "/var/lib/data", read_only: false}],
+  limits: %{memory: 256 <<< 20, pids: 100, cpu: {50_000, 100_000}}
+}
+
+%Tank.Pod.Network{
+  mode: :macvlan,        # :macvlan (v1) | :bridge (later) | :host | :none
+  parent: "eth0",        # uplink NIC — a shared host fact; :auto resolves via Tank.Host
+  ip: :dhcp,             # :dhcp | {"10.0.0.5", 24} | :link_local
+  gateway: nil,          # for static addressing
+  dns: :inherit          # :inherit host DNS, or an explicit list
+}
+```
+
+**Image config → run parameters** follows the OCI spec: `args = command ||
+Entrypoint`, then `++ (args || Cmd)`; `env` is the image `Env` with the pod's
+`env` merged over it; `user` resolves against the *rootfs's* `/etc/passwd` and
+`/etc/group`. (See `Tank.Image` for the citations.)
+
+**Restart + backoff** is owned by the reconciler, K8s-style and configurable:
+`delay = min(10s · 2ⁿ, 300s)`, reset after a stable-run window (~10 min). We do
+not lean on systemd — Nerves has none.
+
+## State: Khepri from day one
+
+Khepri is the **desired-state store** — Tank's etcd. It is single-node now (a
+one-member Raft cluster) and grows into a real cluster later without changing
+shape; that is the whole reason to adopt it early rather than a flat file.
+
+**Who owns the store.** Tank is a *library*, so it never owns the store's
+lifecycle or cluster membership — those are application/host concerns:
+
+- **TankOS owns the store.** It starts Khepri, points Ra's data directory at the
+  writable data partition (flash-wear aware), manages cluster join/leave, and
+  hosts its own `[:tankos, …]` subtrees (e.g. host network config).
+- **Tank owns `[:tank, …]`.** It reads/writes/watches its subtree and takes the
+  *store name* as configuration. For standalone use (tests, dev, Tank without
+  TankOS) `Tank.Store` starts a default store if none is supplied — the
+  "bring-your-own-or-I'll-boot-a-default" pattern.
+
+```
+[:tank, :pods, "web"]   -> serialized %Tank.Pod{}   (the desired pod)
+[:tank, :pods, "db"]    -> serialized %Tank.Pod{}
+```
+
+`config/runtime.exs` **seeds** the subtree idempotently at boot; the runtime API
+(`Tank.apply/1` / `Tank.delete/1`) writes it thereafter. The reconciler reads
+desired state through a **`khepri_projection`** mirroring `[:tank, :pods, **]`
+into ETS: fast local reads, change notifications to wake the loop, and a full
+projection read for the level-triggered resync.
+
+## The reconcile loop
+
+Level-triggered: events are hints, resync is truth. On a timer (and on Khepri
+projection deltas, debounced) the reconciler diffs the **desired** pod set
+against the **observed** running set and actuates:
+
+- desired ∧ ¬running → start a `Tank.Runtime` for the pod
+- running ∧ ¬desired → stop and remove it
+- running ∧ desired-but-changed → reconcile in place where cheap (e.g. network,
+  limits), or restart the pod
+- crashed → restart per policy, with exponential backoff
+
+This composes the `Linx.Reconcile` template directly; per-pod *network* and
+*cgroup* reconciliation reuse `Linx.Netlink.Rtnl.Reconcile` and
+`Linx.Cgroup.Reconcile` inside each runner.
+
+## The hard part: running a real OCI rootfs on Linx (the acceptance test)
+
+`silo-init` did the whole container filesystem setup *inside the child*: mount a
+fresh `/dev` (bind-mounting host device nodes, since `mknod` is barred in a user
+namespace), `/proc`, `/sys`; `pivot_root` into the image rootfs; drop user;
+`execve`. **`Linx.Process` deliberately does none of this** — it clones into
+namespaces, parks at the `:ready` checkpoint, and `execve`s the workload
+directly. The Linx model is: `Linx.Process` makes the namespaces; *other* Linx
+modules configure the child in the checkpoint window, addressing it by
+`{:pid, host_pid}` — `Linx.Mount` (`pivot_root` + the `:in` cross-namespace
+option), `Linx.User`, `Linx.Capabilities`, `Linx.Seccomp`.
+
+So Tank's rootfs path must drive `Linx.Mount` from the host (or from the child)
+to build the container's filesystem at the checkpoint. **Whether the current
+Linx mount/user primitives are sufficient to reproduce silo-init's setup is
+genuinely uncertain** and must be proven by a spike before the orchestration is
+built on it. Known concerns to resolve:
+
+- **`/proc` from the right PID namespace.** A `proc` mount reflects the PID
+  namespace of the process that mounts it. To give the container a `/proc` that
+  shows *its* PIDs, the mount must be performed by a process in the container's
+  PID namespace — which the host-side checkpoint helper is not. Does this force
+  a child-side setup step, or a setns into both mount+pid?
+- **`pivot_root` via a setns'd helper vs in-child.** `pivot_root` acts on the
+  caller's mount namespace; the post-pivot process must `chdir("/")` and the
+  workload must exec with the new root. Can this be driven entirely from the
+  checkpoint window, or does `Linx.Process` need a "run rootfs setup in the
+  child before exec" capability it does not have today?
+- **The standard `/dev` + bind-mounted device nodes, `/dev/pts`, `/dev/shm`,
+  `/sys`** — reproducing silo-init's device setup through `Linx.Mount`.
+- **`userns` (root-remap) + idmapped rootfs** — Silo's hardening (container ids
+  remapped onto an unprivileged host range, rootfs exposed via an idmapped
+  mount). Does Linx expose the idmapped-mount machinery, or is that a gap?
+
+This phase is the substance of Tank's charter: expect it to surface real gaps in
+Linx, and fix them there, not paper over them in Tank.
+
+## Networking
+
+**macvlan on the uplink** is the v1 default and the opinionated choice: the
+container gets its own MAC and a real LAN IP (static, or its own DHCP), no
+bridge, no NAT, no nftables, and the link dies with the netns — so there is no
+allocation or teardown state to manage. The container is a first-class host on
+the LAN, which is the natural embedded-device model. All of it is
+`Linx.Netlink.Rtnl`: create the macvlan on the host NIC, move it into the pod's
+netns as `eth0`, address it and add the default route — driven in the checkpoint
+window, reusing `Rtnl.Reconcile`.
+
+The `%Tank.Pod.Network{}` `mode` discriminant is the extensibility seam:
+**bridge+NAT** (many pods behind a host bridge with port publishing, via
+`Linx.Netfilter`) slots in later as another mode without reshaping the API.
+`:host` (share the host network) and `:none` (isolated netns, loopback only)
+round out the set. A **DHCP-client-in-netns** (for images that cannot address
+themselves) is a later Linx-side addition.
+
+> Note: macvlan is commonly refused on Wi-Fi uplinks by the AP; on Wi-Fi-only
+> devices the bridge mode (later) or `:host` is the path. Worth validating per
+> target.
+
+## Host-config sharing
+
+TankOS owns host networking (today via **VintageNet**; eventually a Linx-based
+stack, then a native Elixir DHCP client/server). Tank must *share certain
+aspects* without owning them. `Tank.Host` is that seam — a small adapter
+exposing:
+
+- the **uplink interface** name (the macvlan parent; resolves `parent: :auto`),
+- the host **DNS servers** (for `dns: :inherit` and the container's
+  `/etc/resolv.conf`),
+- host **IP/connection facts** (snapshot + change notifications).
+
+It is **VintageNet-backed now** — read its PropertyTable
+(`["interface", ifname, "addresses"]`, `["name_servers"]`,
+`["interface", ifname, "connection"]`) and subscribe to its
+`{VintageNet, property, old, new, meta}` events — and **Linx-backed later**,
+behind the *same* interface, so nothing on the Tank side changes when TankOS
+replaces VintageNet. Tank never configures the host's uplink; it only reads it
+and builds container networking off it.
+
+## TankOS (the consumer, out of tree)
+
+TankOS is a separate Nerves application that depends on Tank. Its
+responsibilities, kept out of the Tank library:
+
+- start and own the **Khepri store** (Ra data dir on the writable partition,
+  cluster membership),
+- configure **host networking** (VintageNet today),
+- seed `[:tank, :pods, …]` from device config and expose a management surface,
+- run Tank in its supervision tree.
+
+Tank stays liftable into its own repository: `git mv tank ../tank` plus flipping
+`{:linx, path: ".."}` to `{:linx, "~> x.y"}`.
+
+## Milestones
+
+Each milestone is a commit-and-push checkpoint. Earlier milestones de-risk the
+foundation (image pull, the rootfs spike) before the declarative layer is built
+on top.
+
+- **M0 — Plan + AGENTS.md.** This document and the agent guide. *(done)*
+- **M1 — Lift the image puller.** `Tank.Image{,.Registry,.Tar,.User}` from Silo;
+  pure Elixir; pull + assemble an OCI rootfs; cache; tests. Adds the `req`
+  dependency.
+- **M2 — Rootfs container spike (the acceptance test).** Run a real OCI image on
+  Linx — rootfs setup, standard mounts, `pivot_root`, user drop — via
+  `Linx.Mount`/`Linx.User` in the checkpoint window. Surface and fix Linx gaps.
+- **M3 — Desired-state model + `Tank.Store`.** The `Tank.Pod`/`Container`/
+  `Network`/`Volume` structs; the Khepri seam (BYO-or-default store, the
+  `[:tank, …]` subtree, the ETS projection); seeding from `runtime.exs`. Adds
+  the `khepri` dependency.
+- **M4 — `Tank.Runtime` actuator + macvlan.** One pod spec → running reality:
+  pull → spawn → rootfs setup → macvlan network → cgroup limits → proceed.
+  Reuses `Rtnl.Reconcile` / `Cgroup.Reconcile`.
+- **M5 — `Tank.Reconciler`.** The control loop over the Khepri projection;
+  start/stop/restart; exponential backoff; self-healing; level-triggered resync.
+- **M6 — `Tank.Host` seam.** VintageNet-backed host facts (uplink, DNS, IP);
+  `parent: :auto`; `dns: :inherit`.
+- **M7 — Multi-container pods.** Sidecars sharing the pod's netns and lifetime.
+
+**Later (post-graduation):** bridge+NAT networking (`Linx.Netfilter`),
+DHCP-client-in-netns, `userns` root-remap + idmapped rootfs, overlayfs layer
+stacking, multi-node clustering + a pod scheduler, and lifting Tank to its own
+repository.
+
+## Non-goals
+
+- Full OCI **Runtime Spec** `config.json` / `runc` CLI compatibility — Tank runs
+  images, it is not a compliant runtime.
+- **Pluggable CNI** — Tank is opinionated; networking is macvlan (then bridge),
+  not a plugin surface.
+- **YAML** — desired state is Elixir data in Khepri.
+- A **cluster scheduler** — single-node now; the consistent state tree is in
+  place for when scheduling is added.
+
+## Risks / open questions
+
+- **The Linx mount gap (M2)** — the single biggest unknown; see the rootfs
+  section. May require new `Linx.Process`/`Linx.Mount` capability.
+- **Ra on flash** — the Raft WAL + snapshots wear flash; mitigated by Tank's low
+  config write-volume and a deliberately chosen data dir (TankOS's job).
+- **macvlan on Wi-Fi** — APs commonly refuse it; bridge/`:host` is the fallback.
+- **`Tank.Container` rename** — the current PoC `Tank.Container` *GenServer*
+  becomes `Tank.Runtime`/`Tank.Pod.Runner`; the name `Tank.Container` is reused
+  for the desired-state *struct*. Migrate deliberately.
