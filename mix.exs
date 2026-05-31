@@ -25,7 +25,9 @@ defmodule Tank.MixProject do
     [
       {:linx, path: ".."},
       # HTTP client for the OCI registry client (Tank.Image.Registry).
-      {:req, "~> 0.5"}
+      {:req, "~> 0.5"},
+      # Tree-structured, Raft-replicated desired-state store (Tank.Store).
+      {:khepri, "~> 0.18.0"}
     ]
   end
 end
