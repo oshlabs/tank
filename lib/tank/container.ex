@@ -1,209 +1,134 @@
 defmodule Tank.Container do
   @moduledoc """
-  One container's full lifecycle as a single supervised unit: a workload in its
-  own network namespace, configured at the checkpoint, restarted as a whole on
-  failure.
+  A container's desired state inside a pod.
 
-  This is the cross-subsystem composite — `Linx.Process` + `Linx.Netlink.Rtnl`
-  bound by one lifetime — that the reconcile design says can only live in a
-  consumer. `Tank.Container` *is* that consumer.
+  The OCI image config supplies defaults; these fields override it per the OCI
+  rules (see `Tank.Image`): the run argv is `command || Entrypoint` followed by
+  `args || Cmd`; `env` is merged over the image `Env`; `working_dir` and `user`
+  override the image's, with `user` resolved against the *rootfs's*
+  `/etc/passwd` and `/etc/group`.
 
-  ## Spec
+    * `image` — an OCI reference (`"nginx:1.27"`) or the `{:rootfs, path}` escape
+      hatch (an already-assembled rootfs directory).
+    * `mounts` — `Tank.Mount`s, each naming a pod-level `Tank.Volume`.
+    * `limits` — a map of cgroup limits: `:memory` (bytes), `:pids`, `:cpu`
+      (`{quota_us, period_us}`).
 
-      %{
-        argv: ["/bin/sleep", "60"],         # required
-        namespaces: [:net],                 # required, must include :net
-        network: %{
-          up: ["lo"],                        # interfaces to bring up
-          addresses: [{"lo", "10.0.0.1", 32}],
-          routes: []
-        },
-        owner: self(),                       # optional — receives {:tank, _}
-        id: :my_container                    # optional — child_spec id
-      }
-
-  ## Lifecycle
-
-  `start_link/1` spawns the workload into a fresh netns (parked at `:ready`),
-  configures the namespace from the host (`Rtnl.open({:pid, host_pid})` →
-  bring `:up` interfaces up → `Rtnl.Reconcile.reconcile/2` for addresses and
-  routes), then `proceed/1`s. The owner receives:
-
-    * `{:tank, :running, host_pid}` — configured and running.
-    * `{:tank, :exited, code}` / `{:tank, :signaled, signum}` /
-      `{:tank, :error, reason}` — terminal.
-
-  The container GenServer **stops when its workload terminates**, with a reason
-  derived from the outcome (clean exit → `:normal`; otherwise abnormal), so a
-  supervisor restarts the composite — a brand-new namespace, reconfigured from
-  scratch. On stop it reaps the workload via the session's graceful teardown.
-
-  ## Supervision
-
-      children = [
-        {Tank.Container,
-         %{argv: ["/usr/bin/myd"], namespaces: [:net],
-           network: %{up: ["lo"], addresses: [{"lo", "10.0.0.1", 32}]},
-           owner: MyApp.Events}}
-      ]
-      Supervisor.start_link(children, strategy: :one_for_one)
+  > #### Not the runtime {: .info}
+  > This is the *desired-state struct*. The supervised GenServer that brings a
+  > container to life is `Tank.Runtime`.
   """
 
-  use GenServer
-  require Logger
+  alias Tank.{Mount, Validate}
 
-  alias Linx.Process, as: Workload
-  alias Linx.Netlink.{Rtnl, Socket}
-  alias Linx.Netlink.Rtnl.{Link, Reconcile}
-
-  @type spec :: %{
-          required(:argv) => [String.t()],
-          required(:namespaces) => [atom()],
-          optional(:network) => map(),
-          optional(:owner) => pid(),
-          optional(:id) => term()
+  @type image :: String.t() | {:rootfs, Path.t()}
+  @type t :: %__MODULE__{
+          name: String.t(),
+          image: image(),
+          command: [String.t()],
+          args: [String.t()],
+          env: %{optional(String.t()) => String.t()},
+          working_dir: String.t() | nil,
+          user: String.t() | nil,
+          mounts: [Mount.t()],
+          limits: map()
         }
 
-  @doc "Supervisor child spec; restarts the composite on abnormal exit (`:transient`)."
-  @spec child_spec(spec()) :: Supervisor.child_spec()
-  def child_spec(spec) do
-    %{
-      id: Map.get(spec, :id, __MODULE__),
-      start: {__MODULE__, :start_link, [spec]},
-      restart: :transient,
-      type: :worker
-    }
-  end
+  @enforce_keys [:name, :image]
+  defstruct name: nil,
+            image: nil,
+            command: [],
+            args: [],
+            env: %{},
+            working_dir: nil,
+            user: nil,
+            mounts: [],
+            limits: %{}
 
-  @doc "Starts and configures one container. See the moduledoc for the spec."
-  @spec start_link(spec()) :: GenServer.on_start()
-  def start_link(spec) when is_map(spec), do: GenServer.start_link(__MODULE__, spec)
+  @keys [:name, :image, :command, :args, :env, :working_dir, :user, :mounts, :limits]
 
-  @doc "The workload's host pid, once `:running`. `{:error, :not_running}` before then."
-  @spec host_pid(pid()) :: {:ok, pos_integer()} | {:error, :not_running}
-  def host_pid(container), do: GenServer.call(container, :host_pid)
+  @doc "Build a validated container from a map or keyword list."
+  @spec new(map() | keyword()) :: {:ok, t()} | {:error, term()}
+  def new(attrs) do
+    attrs = attrs |> Map.new() |> Map.delete(:__struct__)
 
-  # === GenServer ============================================================
-
-  @impl true
-  def init(spec) do
-    cond do
-      not is_list(spec[:argv]) or spec[:argv] == [] ->
-        {:stop, {:bad_spec, :argv_required}}
-
-      # Configuring the namespace must not touch the host's network: a netns is
-      # mandatory so Rtnl.open({:pid, host_pid}) enters the container's own.
-      :net not in (spec[:namespaces] || []) ->
-        {:stop, {:bad_spec, :net_namespace_required}}
-
-      true ->
-        case Workload.spawn(argv: spec.argv, namespaces: spec.namespaces, owner: self()) do
-          {:ok, session} ->
-            {:ok, %{spec: spec, session: session, host_pid: nil, owner: spec[:owner]}}
-
-          {:error, reason} ->
-            {:stop, {:spawn_failed, reason}}
-        end
+    with :ok <- Validate.keys(attrs, @keys),
+         {:ok, name} <- Validate.name(attrs[:name]),
+         {:ok, image} <- image(attrs[:image]),
+         {:ok, command} <- Validate.strings(Map.get(attrs, :command, [])),
+         {:ok, args} <- Validate.strings(Map.get(attrs, :args, [])),
+         {:ok, env} <- env(Map.get(attrs, :env, %{})),
+         {:ok, working_dir} <- working_dir(Map.get(attrs, :working_dir)),
+         {:ok, user} <- user(Map.get(attrs, :user)),
+         {:ok, mounts} <- Validate.build_list(Map.get(attrs, :mounts, []), Mount),
+         :ok <- Validate.unique(mounts, & &1.path),
+         {:ok, limits} <- limits(Map.get(attrs, :limits, %{})) do
+      {:ok,
+       %__MODULE__{
+         name: name,
+         image: image,
+         command: command,
+         args: args,
+         env: env,
+         working_dir: working_dir,
+         user: user,
+         mounts: mounts,
+         limits: limits
+       }}
     end
   end
 
-  @impl true
-  def handle_call(:host_pid, _from, %{host_pid: nil} = state),
-    do: {:reply, {:error, :not_running}, state}
+  @doc "Like `new/1` but raises `ArgumentError` on invalid input."
+  @spec new!(map() | keyword()) :: t()
+  def new!(attrs), do: Validate.bang(__MODULE__, attrs)
 
-  def handle_call(:host_pid, _from, %{host_pid: pid} = state),
-    do: {:reply, {:ok, pid}, state}
+  defp image(ref) when is_binary(ref) and ref != "", do: {:ok, ref}
 
-  @impl true
-  # The workload is parked at the checkpoint: its namespace exists but it has
-  # not exec'd. Configure the namespace from the host, then let it proceed.
-  def handle_info({:linx_process, :ready, host_pid}, state) do
-    with :ok <- configure_network(host_pid, Map.get(state.spec, :network, %{})),
-         :ok <- Workload.proceed(state.session) do
-      {:noreply, %{state | host_pid: host_pid}}
-    else
-      {:error, reason} ->
-        Logger.error("Tank.Container: network configuration failed: #{inspect(reason)}")
-        {:stop, {:network_config_failed, reason}, state}
-    end
+  defp image({:rootfs, path}) when is_binary(path) do
+    if Path.type(path) == :absolute,
+      do: {:ok, {:rootfs, path}},
+      else: {:error, {:rootfs_path_not_absolute, path}}
   end
 
-  def handle_info({:linx_process, :running}, state) do
-    notify(state, {:tank, :running, state.host_pid})
-    {:noreply, state}
+  defp image(other), do: {:error, {:invalid_image, other}}
+
+  defp env(map) when is_map(map) do
+    if Enum.all?(map, fn {k, v} -> is_binary(k) and is_binary(v) end),
+      do: {:ok, map},
+      else: {:error, {:invalid_env, map}}
   end
 
-  def handle_info({:linx_process, :exited, 0}, state) do
-    notify(state, {:tank, :exited, 0})
-    {:stop, :normal, state}
+  defp env(other), do: {:error, {:invalid_env, other}}
+
+  defp working_dir(nil), do: {:ok, nil}
+
+  defp working_dir(p) when is_binary(p) do
+    if Path.type(p) == :absolute, do: {:ok, p}, else: {:error, {:working_dir_not_absolute, p}}
   end
 
-  def handle_info({:linx_process, :exited, code}, state) do
-    notify(state, {:tank, :exited, code})
-    {:stop, {:workload_exited, code}, state}
-  end
+  defp working_dir(other), do: {:error, {:invalid_working_dir, other}}
 
-  def handle_info({:linx_process, :signaled, signum}, state) do
-    notify(state, {:tank, :signaled, signum})
-    {:stop, {:workload_signaled, signum}, state}
-  end
+  defp user(nil), do: {:ok, nil}
+  defp user(u) when is_binary(u) and u != "", do: {:ok, u}
+  defp user(other), do: {:error, {:invalid_user, other}}
 
-  def handle_info({:linx_process, :error, errno, stage}, state) do
-    notify(state, {:tank, :error, {errno, stage}})
-    {:stop, {:workload_error, errno, stage}, state}
-  end
-
-  # PTY output and any other lifecycle chatter we don't act on.
-  def handle_info({:linx_process, _}, state), do: {:noreply, state}
-  def handle_info({:linx_process, _, _}, state), do: {:noreply, state}
-  def handle_info(_msg, state), do: {:noreply, state}
-
-  @impl true
-  # Reap the workload on the way down so a restart starts from a clean slate.
-  # (The session is linked, so it would die with us regardless; stopping it
-  # explicitly runs its graceful teardown, which SIGKILLs + reaps the OS child.)
-  def terminate(_reason, state) do
-    if Process.alive?(state.session), do: GenServer.stop(state.session, :normal)
-    :ok
-  end
-
-  # === network configuration ================================================
-
-  defp configure_network(host_pid, network) do
-    case Rtnl.open({:pid, host_pid}) do
-      {:ok, sock} ->
-        try do
-          do_configure(sock, network)
-        after
-          Socket.close(sock)
-        end
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
-  defp do_configure(sock, network) do
-    desired = %{
-      addresses: Map.get(network, :addresses, []),
-      routes: Map.get(network, :routes, [])
-    }
-
-    with :ok <- bring_up(sock, Map.get(network, :up, [])),
-         {:ok, report} <- Reconcile.reconcile(sock, desired) do
-      if report.converged?, do: :ok, else: {:error, {:not_converged, report}}
-    end
-  end
-
-  defp bring_up(sock, links) do
-    Enum.reduce_while(links, :ok, fn name, :ok ->
-      case Link.set_up(sock, name) do
-        :ok -> {:cont, :ok}
-        {:error, _} = error -> {:halt, error}
+  defp limits(map) when is_map(map) do
+    Enum.reduce_while(map, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      case limit(key, value) do
+        :ok -> {:cont, {:ok, Map.put(acc, key, value)}}
+        err -> {:halt, err}
       end
     end)
   end
 
-  defp notify(%{owner: nil}, _msg), do: :ok
-  defp notify(%{owner: owner}, msg), do: send(owner, msg)
+  defp limits(other), do: {:error, {:invalid_limits, other}}
+
+  defp limit(:memory, v) when is_integer(v) and v > 0, do: :ok
+  defp limit(:pids, v) when is_integer(v) and v > 0, do: :ok
+
+  defp limit(:cpu, {quota, period})
+       when is_integer(quota) and quota > 0 and is_integer(period) and period > 0,
+       do: :ok
+
+  defp limit(key, value), do: {:error, {:invalid_limit, key, value}}
 end

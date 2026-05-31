@@ -1,4 +1,4 @@
-defmodule Tank.ContainerTest do
+defmodule Tank.RuntimeTest do
   use ExUnit.Case, async: false
 
   # The composite needs a real network namespace, so these need root.
@@ -8,7 +8,7 @@ defmodule Tank.ContainerTest do
   import Linx.IP
   alias Linx.Netlink.{Rtnl, Socket}
   alias Linx.Netlink.Rtnl.Address
-  alias Tank.Container
+  alias Tank.Runtime
 
   # --- spec validation (no root) --------------------------------------------
 
@@ -18,12 +18,12 @@ defmodule Tank.ContainerTest do
     test "refuses a spec without a :net namespace (would touch the host network)" do
       Process.flag(:trap_exit, true)
       spec = %{argv: ["/bin/true"], namespaces: [:uts]}
-      assert {:error, {:bad_spec, :net_namespace_required}} = Container.start_link(spec)
+      assert {:error, {:bad_spec, :net_namespace_required}} = Runtime.start_link(spec)
     end
 
     test "refuses a spec without argv" do
       Process.flag(:trap_exit, true)
-      assert {:error, {:bad_spec, :argv_required}} = Container.start_link(%{namespaces: [:net]})
+      assert {:error, {:bad_spec, :argv_required}} = Runtime.start_link(%{namespaces: [:net]})
     end
   end
 
@@ -37,7 +37,7 @@ defmodule Tank.ContainerTest do
       owner: self()
     }
 
-    {:ok, container} = Container.start_link(spec)
+    {:ok, container} = Runtime.start_link(spec)
 
     assert_receive {:tank, :running, host_pid}, 5_000
     assert is_integer(host_pid)
@@ -59,7 +59,7 @@ defmodule Tank.ContainerTest do
       restart: :transient
     }
 
-    {:ok, _} = DynamicSupervisor.start_child(sup, Container.child_spec(spec))
+    {:ok, _} = DynamicSupervisor.start_child(sup, Runtime.child_spec(spec))
 
     assert_receive {:tank, :running, host_pid1}, 5_000
     assert address_in_netns?(host_pid1, ~IP"10.0.0.7")

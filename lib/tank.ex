@@ -16,7 +16,7 @@ defmodule Tank do
 
   ## What it composes
 
-  `Tank.Container` ties three Linx mechanisms into one supervised unit:
+  `Tank.Runtime` ties three Linx mechanisms into one supervised unit:
 
     1. **`Linx.Process`** spawns the workload into a fresh network namespace
        and parks it at the `:ready` checkpoint.
@@ -28,7 +28,7 @@ defmodule Tank do
        reconcile design calls for, with lifetime = ownership (the network dies
        and is reborn with the container).
 
-  See `Tank.Container` for the API and the reconcile design notes in the Linx
+  See `Tank.Runtime` for the API and the reconcile design notes in the Linx
   repo (`docs/reconcile/PLAN.md`) for the why.
 
   ## Status
