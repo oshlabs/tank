@@ -323,6 +323,9 @@ on top.
 - **M2 — Rootfs container spike (the acceptance test).** Run a real OCI image on
   Linx — rootfs setup, standard mounts, `pivot_root`, user drop — via
   `Linx.Mount`/`Linx.User` in the checkpoint window. Surface and fix Linx gaps.
+  *(done — ran a real alpine container; the gaps it surfaced are fixed in Linx:
+  pidns-aware proc mount, bind `create:`, `Linx.Process` `:cwd`, and the
+  `:ready` message now reports the host pid.)*
 - **M3 — Desired-state model + `Tank.Store`.** The `Tank.Pod`/`Container`/
   `Network`/`Volume` structs; the Khepri seam (BYO-or-default store, the
   `[:tank, …]` subtree, the ETS projection); seeding from `runtime.exs`. Adds
@@ -355,8 +358,11 @@ repository.
 
 ## Risks / open questions
 
-- **The Linx mount gap (M2)** — the single biggest unknown; see the rootfs
-  section. May require new `Linx.Process`/`Linx.Mount` capability.
+- **The Linx mount gap (M2)** — *resolved.* The rootfs spike needed in-namespace
+  proc/dev setup (pidns-aware proc mount, bind `create:`) plus `Linx.Process`
+  `:cwd`; all landed in Linx. The standing discipline: make the container's mount
+  ns rec-private before any in-container mount, or mounts propagate back to the
+  host.
 - **Ra on flash** — the Raft WAL + snapshots wear flash; mitigated by Tank's low
   config write-volume and a deliberately chosen data dir (TankOS's job).
 - **macvlan on Wi-Fi** — APs commonly refuse it; bridge/`:host` is the fallback.
