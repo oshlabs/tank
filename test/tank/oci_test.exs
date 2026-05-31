@@ -15,22 +15,22 @@ defmodule Tank.OCITest do
       assert {:ok, %{argv: ["/bin/app", "--serve"]}} = OCI.run_params(container(), cfg)
     end
 
-    test "spec command overrides Entrypoint (image Cmd still appended)" do
+    test "spec command overrides Entrypoint and resets the image Cmd" do
       cfg = image(%{"Entrypoint" => ["/bin/app"], "Cmd" => ["--serve"]})
-      c = container(%{command: ["/bin/other"]})
-      assert {:ok, %{argv: ["/bin/other", "--serve"]}} = OCI.run_params(c, cfg)
+      c = container(%{command: ["/bin/sleep", "60"]})
+      assert {:ok, %{argv: ["/bin/sleep", "60"]}} = OCI.run_params(c, cfg)
+    end
+
+    test "spec command ++ args is a full override" do
+      cfg = image(%{"Entrypoint" => ["/bin/app"], "Cmd" => ["--serve"]})
+      c = container(%{command: ["/bin/sh"], args: ["-c", "echo hi"]})
+      assert {:ok, %{argv: ["/bin/sh", "-c", "echo hi"]}} = OCI.run_params(c, cfg)
     end
 
     test "spec args override Cmd" do
       cfg = image(%{"Entrypoint" => ["/bin/app"], "Cmd" => ["--serve"]})
       c = container(%{args: ["--debug"]})
       assert {:ok, %{argv: ["/bin/app", "--debug"]}} = OCI.run_params(c, cfg)
-    end
-
-    test "command + args fully override the image" do
-      cfg = image(%{"Entrypoint" => ["/bin/app"], "Cmd" => ["--serve"]})
-      c = container(%{command: ["/bin/sh"], args: ["-c", "echo hi"]})
-      assert {:ok, %{argv: ["/bin/sh", "-c", "echo hi"]}} = OCI.run_params(c, cfg)
     end
 
     test "no command in spec or image is an error" do

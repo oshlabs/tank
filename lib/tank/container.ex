@@ -2,11 +2,11 @@ defmodule Tank.Container do
   @moduledoc """
   A container's desired state inside a pod.
 
-  The OCI image config supplies defaults; these fields override it per the OCI
-  rules (see `Tank.Image`): the run argv is `command || Entrypoint` followed by
-  `args || Cmd`; `env` is merged over the image `Env`; `working_dir` and `user`
-  override the image's, with `user` resolved against the *rootfs's*
-  `/etc/passwd` and `/etc/group`.
+  The OCI image config supplies defaults; these fields override it (see
+  `Tank.OCI`): `command` overrides the image `Entrypoint` and `args` overrides
+  `Cmd` — and as in Docker, setting `command` resets `Cmd`. `env` is merged over
+  the image `Env`; `working_dir` and `user` override the image's, with `user`
+  resolved against the *rootfs's* `/etc/passwd` and `/etc/group`.
 
     * `image` — an OCI reference (`"nginx:1.27"`) or the `{:rootfs, path}` escape
       hatch (an already-assembled rootfs directory).

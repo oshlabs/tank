@@ -30,9 +30,13 @@ defmodule Tank.Runtime.Rootfs do
   Bring up `rootfs` for the container parked at `host_pid`. On success the
   child's mount namespace has `rootfs` as `/`, with `/proc`, `/dev`, and `/sys`
   populated. Returns the first error encountered.
+
+  `etc_files` is a list of `{host_path, in_rootfs_path}` to bind into the rootfs
+  before the pivot — per-pod files (e.g. `/etc/resolv.conf`, `/etc/hosts`) that
+  must not mutate the shared, content-addressed image rootfs.
   """
-  @spec setup(pos_integer(), Path.t()) :: :ok | {:error, term()}
-  def setup(host_pid, rootfs) when is_integer(host_pid) and is_binary(rootfs) do
+  @spec setup(pos_integer(), Path.t(), [{Path.t(), Path.t()}]) :: :ok | {:error, term()}
+  def setup(host_pid, rootfs, etc_files \\ []) when is_integer(host_pid) and is_binary(rootfs) do
     in_ns = [in: {:pid, host_pid}]
 
     with :ok <- rec_private(in_ns),
@@ -40,6 +44,7 @@ defmodule Tank.Runtime.Rootfs do
          :ok <- mount_proc(rootfs, in_ns),
          :ok <- mount_dev(rootfs, in_ns),
          :ok <- mount_sys(rootfs, in_ns),
+         :ok <- bind_etc_files(rootfs, etc_files, in_ns),
          :ok <- pivot(rootfs, in_ns) do
       :ok
     end
@@ -87,6 +92,17 @@ defmodule Tank.Runtime.Rootfs do
 
   defp mount_sys(rootfs, in_ns) do
     Mount.bind("/sys", Path.join(rootfs, "sys"), [flags: [:rec]] ++ in_ns)
+  end
+
+  defp bind_etc_files(rootfs, etc_files, in_ns) do
+    Enum.reduce_while(etc_files, :ok, fn {host_path, in_rootfs}, :ok ->
+      target = Path.join(rootfs, String.trim_leading(in_rootfs, "/"))
+
+      case Mount.bind(host_path, target, [create: true] ++ in_ns) do
+        :ok -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
   end
 
   defp pivot(rootfs, in_ns) do

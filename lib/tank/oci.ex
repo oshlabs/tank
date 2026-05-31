@@ -3,8 +3,10 @@ defmodule Tank.OCI do
   Interprets a pulled OCI image config against a `Tank.Container` spec to derive
   the workload's run parameters, per the OCI rules:
 
-    * **argv** = `(command || Entrypoint) ++ (args || Cmd)` — the spec's
-      `command`/`args` override the image's `Entrypoint`/`Cmd`.
+    * **argv** — the spec's `command` overrides the image `Entrypoint`, and
+      `args` overrides `Cmd`. As in Docker, **setting `command` resets `Cmd`**:
+      with `command` given, argv is `command ++ args` (the image `Cmd` is
+      dropped); otherwise argv is `Entrypoint ++ (args || Cmd)`.
     * **env** = the image `Env`, with the spec's `env` merged over it.
     * **cwd** = `working_dir || image WorkingDir || "/"`.
 
@@ -24,10 +26,7 @@ defmodule Tank.OCI do
   def run_params(%Container{} = container, image_config) do
     cfg = image_config |> Map.get("config") |> normalize_map()
 
-    entrypoint = if container.command != [], do: container.command, else: list(cfg["Entrypoint"])
-    cmd = if container.args != [], do: container.args, else: list(cfg["Cmd"])
-
-    case entrypoint ++ cmd do
+    case argv(container, cfg) do
       [] ->
         {:error, :no_command}
 
@@ -39,6 +38,15 @@ defmodule Tank.OCI do
            cwd: cwd(container.working_dir, cfg["WorkingDir"])
          }}
     end
+  end
+
+  # `command` overrides Entrypoint; `args` overrides Cmd. Setting `command`
+  # resets Cmd (Docker semantics), so it is a full override: command ++ args.
+  defp argv(%Container{command: [_ | _] = command, args: args}, _cfg), do: command ++ args
+
+  defp argv(%Container{args: args}, cfg) do
+    cmd = if args != [], do: args, else: list(cfg["Cmd"])
+    list(cfg["Entrypoint"]) ++ cmd
   end
 
   defp normalize_map(m) when is_map(m), do: m

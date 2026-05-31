@@ -1,135 +1,171 @@
 defmodule Tank.Runtime do
   @moduledoc """
-  One container's full lifecycle as a single supervised unit: a workload in its
-  own network namespace, configured at the checkpoint, restarted as a whole on
-  failure.
+  Brings one pod to running reality and supervises it.
 
-  This is the cross-subsystem composite — `Linx.Process` + `Linx.Netlink.Rtnl`
-  bound by one lifetime — that the reconcile design says can only live in a
-  consumer. `Tank.Runtime` *is* that consumer.
+  `start_link/2` takes a `%Tank.Pod{}` and, at the `Linx.Process` `:ready`
+  checkpoint, runs the full host-side bring-up:
 
-  > #### Status {: .info}
-  > The M2 proof-of-concept actuator, driven by a free-form map spec. M4 evolves
-  > it to drive a `%Tank.Pod{}` (the desired-state struct that now owns the
-  > `Tank.Container` name) through the full container bring-up sequence.
+    1. pull the image and derive run params (`Tank.OCI`),
+    2. spawn the workload into namespaces, parked at the checkpoint,
+    3. build the rootfs (`Tank.Runtime.Rootfs`) with per-pod `/etc` files
+       (`Tank.Runtime.Etc`),
+    4. configure the network (`Tank.Runtime.Network`),
+    5. apply cgroup limits (`Tank.Runtime.Limits`),
+    6. `proceed` — the workload `execve`s inside its container.
 
-  ## Spec
+  ## Scope (M4)
 
-      %{
-        argv: ["/bin/sleep", "60"],         # required
-        namespaces: [:net],                 # required, must include :net
-        network: %{
-          up: ["lo"],                        # interfaces to bring up
-          addresses: [{"lo", "10.0.0.1", 32}],
-          routes: []
-        },
-        owner: self(),                       # optional — receives {:tank, _}
-        id: :my_container                    # optional — child_spec id
-      }
+  One container per pod (sidecars are M7); the workload runs as the image's
+  default user with **no** user namespace; container stdio goes to `/dev/null`
+  (log capture is a later concern). A pod's netns may still hold several NICs.
 
-  ## Lifecycle
+  ## Owner events
 
-  `start_link/1` spawns the workload into a fresh netns (parked at `:ready`),
-  configures the namespace from the host (`Rtnl.open({:pid, host_pid})` →
-  bring `:up` interfaces up → `Rtnl.Reconcile.reconcile/2` for addresses and
-  routes), then `proceed/1`s. The owner receives:
+  The `:owner` option receives:
 
     * `{:tank, :running, host_pid}` — configured and running.
     * `{:tank, :exited, code}` / `{:tank, :signaled, signum}` /
       `{:tank, :error, reason}` — terminal.
 
-  The container GenServer **stops when its workload terminates**, with a reason
-  derived from the outcome (clean exit → `:normal`; otherwise abnormal), so a
-  supervisor restarts the composite — a brand-new namespace, reconfigured from
-  scratch. On stop it reaps the workload via the session's graceful teardown.
+  The GenServer stops when its workload terminates (clean exit → `:normal`,
+  otherwise abnormal), so a supervisor restarts the whole composite — a fresh
+  rootfs and namespace built from scratch — per the pod's `:restart` policy.
 
-  ## Supervision
+  ## Options
 
-      children = [
-        {Tank.Runtime,
-         %{argv: ["/usr/bin/myd"], namespaces: [:net],
-           network: %{up: ["lo"], addresses: [{"lo", "10.0.0.1", 32}]},
-           owner: MyApp.Events}}
-      ]
-      Supervisor.start_link(children, strategy: :one_for_one)
+    * `:owner` — pid for `{:tank, _}` events (default: none).
+    * `:data_dir` — base dir for per-pod scratch (`<data_dir>/run/<pod>`);
+      defaults to `:tank, :data_dir` or a tmp dir.
+    * `:image` — keyword opts forwarded to `Tank.Image.pull/2` (e.g. `:cache`).
   """
 
   use GenServer
   require Logger
 
   alias Linx.Process, as: Workload
-  alias Linx.Netlink.{Rtnl, Socket}
-  alias Linx.Netlink.Rtnl.{Link, Reconcile}
+  alias Tank.{Container, OCI, Pod}
+  alias Tank.Runtime.{Etc, Limits, Network, Rootfs}
 
-  @type spec :: %{
-          required(:argv) => [String.t()],
-          required(:namespaces) => [atom()],
-          optional(:network) => map(),
-          optional(:owner) => pid(),
-          optional(:id) => term()
-        }
+  # Always-fresh namespaces; :net is added unless the pod shares the host's.
+  @base_namespaces [:mount, :pid, :uts, :ipc]
 
-  @doc "Supervisor child spec; restarts the composite on abnormal exit (`:transient`)."
-  @spec child_spec(spec()) :: Supervisor.child_spec()
-  def child_spec(spec) do
+  # === API ==================================================================
+
+  @doc "Supervisor child spec; restart type derived from the pod's :restart policy."
+  def child_spec({%Pod{} = pod, opts}) do
     %{
-      id: Map.get(spec, :id, __MODULE__),
-      start: {__MODULE__, :start_link, [spec]},
-      restart: :transient,
+      id: {__MODULE__, pod.name},
+      start: {__MODULE__, :start_link, [pod, opts]},
+      restart: restart_type(pod.restart),
       type: :worker
     }
   end
 
-  @doc "Starts and configures one container. See the moduledoc for the spec."
-  @spec start_link(spec()) :: GenServer.on_start()
-  def start_link(spec) when is_map(spec), do: GenServer.start_link(__MODULE__, spec)
+  def child_spec(%Pod{} = pod), do: child_spec({pod, []})
+
+  defp restart_type(:always), do: :permanent
+  defp restart_type(:on_failure), do: :transient
+  defp restart_type(:never), do: :temporary
+
+  @doc "Start and bring up one pod. See the moduledoc for options."
+  @spec start_link(Pod.t(), keyword()) :: GenServer.on_start()
+  def start_link(%Pod{} = pod, opts \\ []), do: GenServer.start_link(__MODULE__, {pod, opts})
 
   @doc "The workload's host pid, once `:running`. `{:error, :not_running}` before then."
   @spec host_pid(pid()) :: {:ok, pos_integer()} | {:error, :not_running}
-  def host_pid(container), do: GenServer.call(container, :host_pid)
+  def host_pid(runtime), do: GenServer.call(runtime, :host_pid)
 
-  # === GenServer ============================================================
+  # === lifecycle ============================================================
 
   @impl true
-  def init(spec) do
-    cond do
-      not is_list(spec[:argv]) or spec[:argv] == [] ->
-        {:stop, {:bad_spec, :argv_required}}
+  def init({%Pod{} = pod, opts}) do
+    case sole_container(pod) do
+      {:ok, container} ->
+        state = %{
+          pod: pod,
+          container: container,
+          owner: opts[:owner],
+          image_opts: Keyword.get(opts, :image, []),
+          data_dir: Keyword.get(opts, :data_dir, default_data_dir()),
+          session: nil,
+          host_pid: nil,
+          cgroup: nil,
+          scratch: nil,
+          rootfs: nil,
+          etc_files: []
+        }
 
-      # Configuring the namespace must not touch the host's network: a netns is
-      # mandatory so Rtnl.open({:pid, host_pid}) enters the container's own.
-      :net not in (spec[:namespaces] || []) ->
-        {:stop, {:bad_spec, :net_namespace_required}}
+        {:ok, state, {:continue, :bring_up}}
 
-      true ->
-        case Workload.spawn(argv: spec.argv, namespaces: spec.namespaces, owner: self()) do
-          {:ok, session} ->
-            {:ok, %{spec: spec, session: session, host_pid: nil, owner: spec[:owner]}}
-
-          {:error, reason} ->
-            {:stop, {:spawn_failed, reason}}
-        end
+      {:error, reason} ->
+        {:stop, reason}
     end
   end
 
-  @impl true
-  def handle_call(:host_pid, _from, %{host_pid: nil} = state),
-    do: {:reply, {:error, :not_running}, state}
+  # M4: one container per pod.
+  defp sole_container(%Pod{containers: [container]}), do: {:ok, container}
 
-  def handle_call(:host_pid, _from, %{host_pid: pid} = state),
-    do: {:reply, {:ok, pid}, state}
+  defp sole_container(%Pod{containers: [container | _], name: name}) do
+    Logger.warning(
+      "Tank.Runtime[#{name}]: multi-container pods are M7; running only #{container.name}"
+    )
+
+    {:ok, container}
+  end
+
+  defp sole_container(%Pod{}), do: {:error, :no_containers}
 
   @impl true
-  # The workload is parked at the checkpoint: its namespace exists but it has
-  # not exec'd. Configure the namespace from the host, then let it proceed.
-  def handle_info({:linx_process, :ready, host_pid}, state) do
-    with :ok <- configure_network(host_pid, Map.get(state.spec, :network, %{})),
-         :ok <- Workload.proceed(state.session) do
-      {:noreply, %{state | host_pid: host_pid}}
+  def handle_continue(:bring_up, state) do
+    scratch = Path.join([state.data_dir, "run", state.pod.name])
+
+    with {:ok, rootfs, config} <- resolve_image(state.container, state.image_opts),
+         {:ok, run} <- OCI.run_params(state.container, config),
+         etc_files = Etc.materialize(state.pod, scratch),
+         {:ok, session} <- spawn_workload(state.pod, run) do
+      {:noreply,
+       %{state | session: session, rootfs: rootfs, scratch: scratch, etc_files: etc_files}}
     else
+      {:error, reason} -> {:stop, {:bring_up_failed, reason}, state}
+    end
+  end
+
+  defp resolve_image(%Container{image: {:rootfs, path}}, _opts), do: {:ok, path, %{}}
+
+  defp resolve_image(%Container{image: ref}, opts) when is_binary(ref) do
+    case Tank.Image.pull(ref, opts) do
+      {:ok, %{rootfs: rootfs, config: config}} -> {:ok, rootfs, config}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp spawn_workload(%Pod{} = pod, run) do
+    Workload.spawn(
+      argv: run.argv,
+      env: run.env,
+      cwd: run.cwd,
+      namespaces: namespaces(pod.network),
+      owner: self(),
+      stdio: :devnull
+    )
+  end
+
+  defp namespaces(:host), do: @base_namespaces
+  defp namespaces(_network), do: [:net | @base_namespaces]
+
+  # === the checkpoint =======================================================
+
+  @impl true
+  def handle_info({:linx_process, :ready, host_pid}, state) do
+    case bring_up(state, host_pid) do
+      {:ok, cgroup} ->
+        :ok = Workload.proceed(state.session)
+        {:noreply, %{state | host_pid: host_pid, cgroup: cgroup}}
+
       {:error, reason} ->
-        Logger.error("Tank.Runtime: network configuration failed: #{inspect(reason)}")
-        {:stop, {:network_config_failed, reason}, state}
+        Logger.error("Tank.Runtime[#{state.pod.name}]: bring-up failed: #{inspect(reason)}")
+        Workload.abort(state.session)
+        {:stop, {:bring_up_failed, reason}, state}
     end
   end
 
@@ -158,57 +194,43 @@ defmodule Tank.Runtime do
     {:stop, {:workload_error, errno, stage}, state}
   end
 
-  # PTY output and any other lifecycle chatter we don't act on.
+  # Lifecycle chatter we don't act on (PTY output, etc.).
   def handle_info({:linx_process, _}, state), do: {:noreply, state}
   def handle_info({:linx_process, _, _}, state), do: {:noreply, state}
   def handle_info(_msg, state), do: {:noreply, state}
 
+  # Runs in the child's namespaces, host-side, while the workload waits.
+  defp bring_up(state, host_pid) do
+    with :ok <- Rootfs.setup(host_pid, state.rootfs, state.etc_files),
+         :ok <- Network.setup(host_pid, state.pod.network),
+         {:ok, cgroup} <- Limits.apply(state.pod.name, host_pid, state.container.limits) do
+      {:ok, cgroup}
+    end
+  end
+
   @impl true
-  # Reap the workload on the way down so a restart starts from a clean slate.
-  # (The session is linked, so it would die with us regardless; stopping it
-  # explicitly runs its graceful teardown, which SIGKILLs + reaps the OS child.)
+  def handle_call(:host_pid, _from, %{host_pid: nil} = state),
+    do: {:reply, {:error, :not_running}, state}
+
+  def handle_call(:host_pid, _from, %{host_pid: pid} = state),
+    do: {:reply, {:ok, pid}, state}
+
+  @impl true
   def terminate(_reason, state) do
-    if Process.alive?(state.session), do: GenServer.stop(state.session, :normal)
+    if is_pid(state.session) and Process.alive?(state.session),
+      do: GenServer.stop(state.session, :normal)
+
+    Limits.remove(state.cgroup)
+    if state.scratch, do: File.rm_rf(state.scratch)
     :ok
   end
 
-  # === network configuration ================================================
-
-  defp configure_network(host_pid, network) do
-    case Rtnl.open({:pid, host_pid}) do
-      {:ok, sock} ->
-        try do
-          do_configure(sock, network)
-        after
-          Socket.close(sock)
-        end
-
-      {:error, _} = error ->
-        error
-    end
-  end
-
-  defp do_configure(sock, network) do
-    desired = %{
-      addresses: Map.get(network, :addresses, []),
-      routes: Map.get(network, :routes, [])
-    }
-
-    with :ok <- bring_up(sock, Map.get(network, :up, [])),
-         {:ok, report} <- Reconcile.reconcile(sock, desired) do
-      if report.converged?, do: :ok, else: {:error, {:not_converged, report}}
-    end
-  end
-
-  defp bring_up(sock, links) do
-    Enum.reduce_while(links, :ok, fn name, :ok ->
-      case Link.set_up(sock, name) do
-        :ok -> {:cont, :ok}
-        {:error, _} = error -> {:halt, error}
-      end
-    end)
-  end
+  # === helpers ==============================================================
 
   defp notify(%{owner: nil}, _msg), do: :ok
   defp notify(%{owner: owner}, msg), do: send(owner, msg)
+
+  defp default_data_dir do
+    Application.get_env(:tank, :data_dir) || Path.join(System.tmp_dir!(), "tank")
+  end
 end
