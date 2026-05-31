@@ -239,6 +239,43 @@ built on it. Known concerns to resolve:
 This phase is the substance of Tank's charter: expect it to surface real gaps in
 Linx, and fix them there, not paper over them in Tank.
 
+**Resolved (M2): host-side setup is the pattern, and it holds.** The spike
+proved the whole rootfs can be built from the host in the checkpoint window —
+`spawn` → receive `:ready` (which carries the workload's **host pid**) →
+configure everything from Elixir via the public `Linx.*` verbs → `proceed`. The
+deliberate consequence is a *thin, general C port*: `linx_process` knows only
+`clone`/`setns`/`fork`/`execve` + the checkpoint relay, and zero rootfs policy.
+All policy (proc, dev, sys, pivot, network, cgroups, uid maps) lives in testable,
+composable Elixir, the same verbs every other caller uses. This minimises the
+privileged/unsafe surface and gives every concern the same lifecycle shape.
+
+The two open questions above are answered:
+
+- **`/proc` from the right pidns** needs no child-side setup step. `Linx.Mount`,
+  when mounting `proc` with `in: {:pid, host_pid}`, enters the target *pid*
+  namespace and `fork()`s a child to do the mount, so procfs binds to the
+  container's pidns. This is the one resource that fights host-side mounting
+  (procfs binds to the *mounting task's* pidns), and the fork is a small,
+  contained C mechanism that keeps the host-side pattern **universal** rather
+  than carving out an exception for proc.
+- **`pivot_root`** is driven entirely from the checkpoint window via
+  `Linx.Mount.pivot_root` with `:in`; the workload then gets a valid cwd via
+  `Linx.Process`'s `:cwd` (chdir before execve). No "run setup in the child"
+  capability is needed.
+
+Two disciplines this pattern demands, both now standing rules:
+
+- **rec-private before any in-container mount.** A child's mount ns is a *shared
+  peer* of the host's, so a mount into it propagates back and can break the host
+  (`mount("", "/", "", flags: [:private, :rec], in: {:pid, host_pid})` first).
+- **address the container by its host pid**, the value `:ready` now reports
+  (its in-namespace pid is 1 in a fresh pidns → resolves to systemd).
+
+The one sharp edge of the approach: the forked proc-mount child must stay
+**async-signal-safe** (only `mount`/`write`/`_exit` — no malloc/erl_nif), or it
+deadlocks against a BEAM-held lock. It is the single place where host-side setup
+pays for itself in C; everything else is plain Elixir. Guard that function.
+
 ## Networking
 
 **macvlan on the uplink** is the v1 default and the opinionated choice: a
