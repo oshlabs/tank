@@ -366,7 +366,10 @@ on top.
 - **M3 — Desired-state model + `Tank.Store`.** The `Tank.Pod`/`Container`/
   `Network`/`Volume` structs; the Khepri seam (BYO-or-default store, the
   `[:tank, …]` subtree, the ETS projection); seeding from `runtime.exs`. Adds
-  the `khepri` dependency.
+  the `khepri` dependency. *(done — `Tank.Pod` & friends with validating
+  `new/1`; `Tank.Store` (CRUD + projection); `Tank.apply/1`/`delete/1`/`list/0`;
+  `Tank.Application` seeds create-if-absent. The PoC `Tank.Container` GenServer
+  was renamed to `Tank.Runtime`, freeing the struct name.)*
 - **M4 — `Tank.Runtime` actuator + macvlan.** One pod spec → running reality:
   pull → spawn → rootfs setup → macvlan network (**static IPs**) → cgroup limits
   → proceed. A pod's netns may hold several `%Tank.Nic{}`. Reuses
@@ -403,6 +406,6 @@ repository.
 - **Ra on flash** — the Raft WAL + snapshots wear flash; mitigated by Tank's low
   config write-volume and a deliberately chosen data dir (TankOS's job).
 - **macvlan on Wi-Fi** — APs commonly refuse it; bridge/`:host` is the fallback.
-- **`Tank.Container` rename** — the current PoC `Tank.Container` *GenServer*
-  becomes `Tank.Runtime`/`Tank.Pod.Runner`; the name `Tank.Container` is reused
-  for the desired-state *struct*. Migrate deliberately.
+- **`Tank.Container` rename** — *done (M3).* The PoC `Tank.Container` GenServer
+  is now `Tank.Runtime`; `Tank.Container` is the desired-state struct. M4 grows
+  `Tank.Runtime` from a single-container PoC into the pod actuator.
