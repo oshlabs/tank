@@ -18,10 +18,14 @@ defmodule Tank.MixProject do
   end
 
   def application do
-    [extra_applications: [:logger]]
+    [extra_applications: [:logger, :crypto]]
   end
 
   defp deps do
-    [{:linx, path: ".."}]
+    [
+      {:linx, path: ".."},
+      # HTTP client for the OCI registry client (Tank.Image.Registry).
+      {:req, "~> 0.5"}
+    ]
   end
 end
