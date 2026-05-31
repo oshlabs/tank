@@ -409,3 +409,11 @@ repository.
 - **`Tank.Container` rename** — *done (M3).* The PoC `Tank.Container` GenServer
   is now `Tank.Runtime`; `Tank.Container` is the desired-state struct. M4 grows
   `Tank.Runtime` from a single-container PoC into the pod actuator.
+- **Container log capture (M4-adjacent gap)** — `Linx.Process` applies its
+  `:stdio` directive *in the child, after `proceed`* — i.e. after `pivot_root`.
+  A host path (the `connect_unix` socket) is therefore unreachable from the
+  pivoted rootfs, so the current stdio mechanism can't carry a container's
+  stdout/stderr to a host-side log sink. Capturing container logs needs the
+  output fd wired up *before* the pivot (a pre-connected fd inherited across
+  exec, or a Linx.Process option for it). Out of M4 scope (M4 sends container
+  stdio to `/dev/null`); revisit when logging is built.
