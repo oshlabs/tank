@@ -372,8 +372,13 @@ on top.
   was renamed to `Tank.Runtime`, freeing the struct name.)*
 - **M4 — `Tank.Runtime` actuator + macvlan.** One pod spec → running reality:
   pull → spawn → rootfs setup → macvlan network (**static IPs**) → cgroup limits
-  → proceed. A pod's netns may hold several `%Tank.Nic{}`. Reuses
-  `Rtnl.Reconcile` / `Cgroup.Reconcile`.
+  → proceed. A pod's netns may hold several `%Tank.Nic{}`. *(done — `Tank.Runtime`
+  drives the full host-side bring-up: `Tank.OCI` run params, `Runtime.Rootfs`
+  (+ `Etc` for per-pod `/etc`), `Runtime.Network` (macvlan create-in-host →
+  move-to-netns), `Runtime.Limits` (cgroup v2); supervised, restart per policy,
+  cgroup/scratch torn down on exit. Scope: one container per pod (M7 for more),
+  root-in-container/no userns, stdio → `/dev/null`. Cgroup limits are imperative
+  — there is no `Cgroup.Reconcile`. Verified end-to-end on real alpine.)*
 - **M5 — `Tank.Reconciler`.** The control loop over the Khepri projection;
   start/stop/restart; exponential backoff; self-healing; level-triggered resync.
 - **M6 — `Tank.Host` seam.** The `Tank.Host` behaviour + `Tank.Host.Static`
