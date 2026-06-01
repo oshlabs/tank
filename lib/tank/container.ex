@@ -13,6 +13,9 @@ defmodule Tank.Container do
     * `mounts` — `Tank.Mount`s, each naming a pod-level `Tank.Volume`.
     * `limits` — a map of cgroup limits: `:memory` (bytes), `:pids`, `:cpu`
       (`{quota_us, period_us}`).
+    * `tty` — when `true`, the container's main process runs on a PTY (rather
+      than `/dev/null`), so `Tank.attach/1` can take over its terminal. Use it
+      for a container that *is* an interactive shell. Default `false`.
 
   > #### Not the runtime {: .info}
   > This is the *desired-state struct*. The supervised GenServer that brings a
@@ -31,7 +34,8 @@ defmodule Tank.Container do
           working_dir: String.t() | nil,
           user: String.t() | nil,
           mounts: [Mount.t()],
-          limits: map()
+          limits: map(),
+          tty: boolean()
         }
 
   @enforce_keys [:name, :image]
@@ -43,9 +47,10 @@ defmodule Tank.Container do
             working_dir: nil,
             user: nil,
             mounts: [],
-            limits: %{}
+            limits: %{},
+            tty: false
 
-  @keys [:name, :image, :command, :args, :env, :working_dir, :user, :mounts, :limits]
+  @keys [:name, :image, :command, :args, :env, :working_dir, :user, :mounts, :limits, :tty]
 
   @doc "Build a validated container from a map or keyword list."
   @spec new(map() | keyword()) :: {:ok, t()} | {:error, term()}
@@ -62,7 +67,8 @@ defmodule Tank.Container do
          {:ok, user} <- user(Map.get(attrs, :user)),
          {:ok, mounts} <- Validate.build_list(Map.get(attrs, :mounts, []), Mount),
          :ok <- Validate.unique(mounts, & &1.path),
-         {:ok, limits} <- limits(Map.get(attrs, :limits, %{})) do
+         {:ok, limits} <- limits(Map.get(attrs, :limits, %{})),
+         {:ok, tty} <- Validate.one_of(Map.get(attrs, :tty, false), [true, false]) do
       {:ok,
        %__MODULE__{
          name: name,
@@ -73,7 +79,8 @@ defmodule Tank.Container do
          working_dir: working_dir,
          user: user,
          mounts: mounts,
-         limits: limits
+         limits: limits,
+         tty: tty
        }}
     end
   end

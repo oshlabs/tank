@@ -74,4 +74,61 @@ defmodule Tank.RuntimeTest do
     assert_receive {:tank, :running, host_pid2}, 15_000
     assert host_pid2 != host_pid1
   end
+
+  describe "attach handoff (tty: true)" do
+    test "begin_attach hands off the main PTY; detach leaves the workload running" do
+      # /bin/cat as the main process: interactive, stays alive on a PTY.
+      p = pod("rt-attach", %{command: ["/bin/cat"], tty: true})
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+      assert_receive {:tank, :running, _host_pid}, 15_000
+
+      # Hand the session to this test; we become the owner of :pty_out.
+      {:ok, session} = Runtime.begin_attach(runtime, self())
+      :ok = Linx.Process.pty_write(session, "hello\n")
+      assert_receive {:linx_process, :pty_out, bytes}, 5_000
+      assert bytes =~ "hello"
+
+      # Detach (no exit): ownership returns to the runtime, which stays up.
+      :ok = Runtime.end_attach(runtime)
+      assert Process.alive?(runtime)
+      assert {:ok, %{stage: :running}} = Linx.Process.info(session)
+
+      GenServer.stop(runtime)
+    end
+
+    test "a main process that exits during attach makes end_attach stop the runtime" do
+      p = pod("rt-attach-exit", %{command: ["/bin/cat"], tty: true}, %{restart: :never})
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+      assert_receive {:tank, :running, _host_pid}, 15_000
+
+      # The runtime stops abnormally below; trap its linked exit so it doesn't
+      # take the test process down with it.
+      Process.flag(:trap_exit, true)
+
+      {:ok, session} = Runtime.begin_attach(runtime, self())
+      ref = Process.monitor(runtime)
+
+      # The main process dies while we (not the runtime) own the session. It is
+      # PID 1 in its namespace, so only SIGKILL is honoured (the kernel drops an
+      # un-handled SIGTERM to a namespace init).
+      :ok = Linx.Process.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 5_000
+
+      # end_attach re-derives the terminal state and stops the runtime — so in
+      # production the reconciler would apply the restart policy.
+      :ok = Runtime.end_attach(runtime)
+      assert_receive {:DOWN, ^ref, :process, ^runtime, _}, 5_000
+      assert_received {:tank, :signaled, 9}
+    end
+
+    test "begin_attach refuses a non-tty container with :not_a_tty" do
+      p = pod("rt-attach-notty", %{command: ["/bin/sleep", "30"]})
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+      assert_receive {:tank, :running, _host_pid}, 15_000
+
+      assert {:error, :not_a_tty} = Runtime.begin_attach(runtime, self())
+
+      GenServer.stop(runtime)
+    end
+  end
 end

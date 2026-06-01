@@ -156,6 +156,14 @@ defmodule Tank.PodTest do
                  mounts: [%{volume: "v", path: "/x"}, %{volume: "w", path: "/x"}]
                })
     end
+
+    test "tty defaults to false and accepts a boolean, rejecting non-booleans" do
+      assert {:ok, %Container{tty: false}} = Container.new(%{name: "c", image: "a"})
+      assert {:ok, %Container{tty: true}} = Container.new(%{name: "c", image: "a", tty: true})
+
+      assert {:error, {:not_allowed, "yes", [true, false]}} =
+               Container.new(%{name: "c", image: "a", tty: "yes"})
+    end
   end
 
   describe "Nic.new/1" do

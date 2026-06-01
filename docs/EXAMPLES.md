@@ -331,3 +331,45 @@ Because the PTY is wired through your terminal, call `Tank.exec/3` straight
 from `iex` (or anywhere the caller owns a terminal) — it blocks for the life of
 the session and restores your terminal cleanly when the command exits, even on
 a crash.
+
+### `Tank.attach` — taking over the main process
+
+`Tank.attach/1` is the `docker attach` model: instead of running a *second*
+process, the container's **main** process *is* the interactive program, and you
+take over its terminal. Declare the container with `tty: true` so its main
+process runs on a PTY:
+
+    Tank.apply(%{
+      name: "console",
+      restart: :always,
+      containers: [%{name: "sh", image: "debian:13",
+                     command: ["/bin/bash"], tty: true}]
+    })
+
+    Tank.attach("console")
+
+Your terminal becomes the container's bash. Since ending that bash would stop
+the whole pod, leave *without* killing it by pressing the detach sequence —
+`Ctrl-P` `Ctrl-Q` — and re-attach whenever you like:
+
+    Tank.attach("console")
+    # ... work in the shell, then press Ctrl-P Ctrl-Q ...
+    #=> {:ok, :detached}
+
+    Tank.attach("console")   # back in the same bash, still running
+
+If you *do* end the main process (type `exit`, or it crashes), `attach/1`
+returns its terminal result and the pod stops — at which point the reconciler
+applies the pod's `restart` policy. With `restart: :always`, a fresh bash comes
+right back up.
+
+    Tank.attach("console")
+    # ... type `exit` ...
+    #=> {:ok, {:exited, 0}}
+
+`attach/1` returns `{:error, :not_a_tty}` if the container wasn't declared
+`tty: true`, and `{:error, :not_running}` if the pod has no live workload.
+
+**`exec` vs `attach` at a glance:** use `exec` to get a shell *beside* a
+running service (the common case — the service keeps serving); use `attach`
+when the container *is* the interactive program and you want its own terminal.

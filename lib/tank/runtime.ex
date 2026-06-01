@@ -87,6 +87,30 @@ defmodule Tank.Runtime do
   @spec exec_context(pid()) :: {:ok, exec_context()} | {:error, :not_running}
   def exec_context(runtime), do: GenServer.call(runtime, :exec_context)
 
+  @doc """
+  Begin an attach to a `tty: true` container's main process: hand the session's
+  event stream to `attacher` and return the session pid for `Linx.Tty.attach/3`.
+
+  `{:error, :not_running}` if the workload isn't up yet; `{:error, :not_a_tty}`
+  if the container wasn't started with `tty: true` (there is no PTY to attach
+  to). Pair every success with `end_attach/1`.
+  """
+  @spec begin_attach(pid(), pid()) :: {:ok, pid()} | {:error, :not_running | :not_a_tty}
+  def begin_attach(runtime, attacher), do: GenServer.call(runtime, {:begin_attach, attacher})
+
+  @doc """
+  End an attach: take ownership of the session back and re-derive the workload's
+  state. If it terminated while detached, the runtime acts on it now (stopping
+  so the reconciler applies the restart policy). Best-effort — a no-op if the
+  runtime is already gone.
+  """
+  @spec end_attach(pid()) :: :ok
+  def end_attach(runtime) do
+    GenServer.call(runtime, :end_attach)
+  catch
+    :exit, _ -> :ok
+  end
+
   # === lifecycle ============================================================
 
   @impl true
@@ -142,7 +166,7 @@ defmodule Tank.Runtime do
     with {:ok, rootfs, config} <- resolve_image(state.container, state.image_opts),
          {:ok, run} <- OCI.run_params(state.container, config),
          etc_files = Etc.materialize(state.pod, scratch),
-         {:ok, session} <- spawn_workload(state.pod, run) do
+         {:ok, session} <- spawn_workload(state.pod, state.container, run) do
       {:noreply,
        %{
          state
@@ -167,14 +191,16 @@ defmodule Tank.Runtime do
     end
   end
 
-  defp spawn_workload(%Pod{} = pod, run) do
+  defp spawn_workload(%Pod{} = pod, %Container{} = container, run) do
     Workload.spawn(
       argv: run.argv,
       env: run.env,
       cwd: run.cwd,
       namespaces: namespaces(pod.network),
       owner: self(),
-      stdio: :devnull
+      # A `tty: true` container's main process runs on a PTY so Tank.attach can
+      # take it over; otherwise its stdio is discarded (log capture is later).
+      stdio: if(container.tty, do: :pty, else: :devnull)
     )
   end
 
@@ -257,6 +283,59 @@ defmodule Tank.Runtime do
 
   def handle_call(:exec_context, _from, %{host_pid: pid} = state),
     do: {:reply, {:ok, %{host_pid: pid, env: state.env, working_dir: state.working_dir}}, state}
+
+  def handle_call({:begin_attach, attacher}, _from, %{session: session, host_pid: pid} = state)
+      when is_pid(session) and is_integer(pid) do
+    case Workload.pty_master(session) do
+      {:ok, _} ->
+        :ok = Workload.set_owner(session, attacher)
+        {:reply, {:ok, session}, state}
+
+      {:error, :no_pty} ->
+        {:reply, {:error, :not_a_tty}, state}
+    end
+  end
+
+  def handle_call({:begin_attach, _attacher}, _from, state),
+    do: {:reply, {:error, :not_running}, state}
+
+  # Reclaim ownership and re-derive the workload's state (Model A, level-
+  # triggered): if it terminated while detached, the owning runtime never saw
+  # the lifecycle message, so we act on it now exactly as the handle_info
+  # clauses would.
+  def handle_call(:end_attach, _from, %{session: session} = state) when is_pid(session) do
+    :ok = Workload.set_owner(session, self())
+
+    case Workload.info(session) do
+      {:ok, %{stage: stage, result: result}} when stage in [:exited, :signaled, :errored, :aborted] ->
+        reclaim_terminal(result, state)
+
+      _ ->
+        {:reply, :ok, state}
+    end
+  end
+
+  def handle_call(:end_attach, _from, state), do: {:reply, :ok, state}
+
+  defp reclaim_terminal({:exited, 0}, state) do
+    notify(state, {:tank, :exited, 0})
+    {:stop, :normal, :ok, state}
+  end
+
+  defp reclaim_terminal({:exited, code}, state) do
+    notify(state, {:tank, :exited, code})
+    {:stop, {:workload_exited, code}, :ok, state}
+  end
+
+  defp reclaim_terminal({:signaled, signum}, state) do
+    notify(state, {:tank, :signaled, signum})
+    {:stop, {:workload_signaled, signum}, :ok, state}
+  end
+
+  defp reclaim_terminal(other, state) do
+    notify(state, {:tank, :error, other})
+    {:stop, {:workload_terminated, other}, :ok, state}
+  end
 
   @impl true
   def terminate(_reason, state) do

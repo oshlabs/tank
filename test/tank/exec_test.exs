@@ -38,4 +38,8 @@ defmodule Tank.ExecTest do
   test "exec on a pod that isn't running returns {:error, :not_running}" do
     assert {:error, :not_running} = Tank.exec("ghost", ["/bin/sh"])
   end
+
+  test "attach on a pod that isn't running returns {:error, :not_running}" do
+    assert {:error, :not_running} = Tank.attach("ghost")
+  end
 end

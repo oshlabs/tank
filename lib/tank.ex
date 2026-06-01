@@ -144,6 +144,53 @@ defmodule Tank do
 
   defp env_key(kv), do: kv |> String.split("=", parts: 2) |> hd()
 
+  @doc """
+  Attach to a `tty: true` pod's main process — `docker attach`.
+
+  Where `exec/3` runs a *second* process inside the pod, `attach/1` takes over
+  the pod's **main** process's terminal: the container *is* the interactive
+  program (declare its container with `tty: true`). Because ending that program
+  stops the container, leave without killing it by pressing the detach sequence
+  — `Ctrl-P` `Ctrl-Q` — which returns `{:ok, :detached}` with the pod still
+  running, ready to re-attach.
+
+      Tank.apply(%{
+        name: "console",
+        containers: [%{name: "sh", image: "debian:13",
+                       command: ["/bin/bash"], tty: true}]
+      })
+
+      Tank.attach("console")   #=> your terminal becomes the pod's bash
+
+  Returns the session's terminal result — `{:ok, {:exited, code}}` /
+  `{:ok, {:signaled, signum}}` (the program ended — the pod stops and the
+  reconciler applies its restart policy), `{:ok, :detached}` (you detached), or
+  `{:error, reason}` (`:not_running` if the pod has no live workload,
+  `:not_a_tty` if its container wasn't declared `tty: true`).
+
+  Like `exec/3`, this runs in and blocks the caller's process and routes the PTY
+  through it — call it straight from `iex`.
+  """
+  @spec attach(String.t()) ::
+          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()} | :detached}
+          | {:error, term()}
+  def attach(pod_name) when is_binary(pod_name) do
+    case Map.fetch(Reconciler.running(), pod_name) do
+      {:ok, runtime} -> attach_session(runtime)
+      :error -> {:error, :not_running}
+    end
+  end
+
+  defp attach_session(runtime) do
+    with {:ok, session} <- Runtime.begin_attach(runtime, self()) do
+      try do
+        Linx.Tty.attach(:group_leader, session)
+      after
+        Runtime.end_attach(runtime)
+      end
+    end
+  end
+
   @doc false
   # Bootstrap seed: write each spec create-if-absent, so config never clobbers
   # runtime-changed state. Invalid specs and write failures are logged, not
