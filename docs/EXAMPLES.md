@@ -1,14 +1,32 @@
 # Tank by example
 
-Tank is a declarative container orchestrator for the BEAM, built on
-[Linx](../../README.md). You describe the containers that should run — their
-image, network, resources, and restart policy — as plain Elixir data; Tank
-persists that desired state and a reconcile loop converges the machine toward
-it and keeps it there across drift, crashes, and reboots.
+Tank is a declarative container orchestrator for the BEAM, built entirely on
+[Linx](../../README.md). You describe the pods that should run — their image,
+network, resources, and restart policy — as plain Elixir data; Tank persists
+that desired state in a Khepri store, and a reconcile loop converges the machine
+toward it, keeping it there across drift, crashes, and reboots.
 
-You never imperatively start a container. You **state intent** —
-`Tank.apply/1` — and the loop makes reality match. This guide walks the whole
-surface from a one-liner pod to an interactive shell inside a running container.
+It is the Kubernetes shape collapsed to a single node: **you never imperatively
+start a container.** You state intent with `Tank.apply/1`, and the loop makes
+reality match — start, restart-with-backoff, stop — until you change the intent.
+Tank is deliberately opinionated (macvlan networking, one consistent state tree)
+so an embedded device — its home is TankOS, a Nerves device OS — gets a runtime
+rather than a kit of parts. It also runs standalone on a plain Linux laptop,
+which is where these examples run.
+
+This guide walks the whole surface, from a one-line pod to an interactive shell
+inside a running container.
+
+## Contents
+
+- [Running the examples](#running-the-examples)
+- [Declarative basics](#declarative-basics) — apply/list/get/delete, images, the OCI command/env merge
+- [Resources](#resources) — volumes, limits, restart policy
+- [Networking](#networking) — `:none`, `:host`, macvlan
+- [The loop](#the-loop) — how desired state becomes reality
+- [Operational config](#operational-config) — data dir, the store, boot seeding
+- [Interactive containers](#interactive-containers) — `Tank.exec` and `Tank.attach`
+- [Putting it all together](#putting-it-all-together) — a flagship pod, end to end
 
 ## Running the examples
 
@@ -373,3 +391,53 @@ right back up.
 **`exec` vs `attach` at a glance:** use `exec` to get a shell *beside* a
 running service (the common case — the service keeps serving); use `attach`
 when the container *is* the interactive program and you want its own terminal.
+
+## Putting it all together
+
+A realistic pod brings the pieces together — a real LAN IP via macvlan, a
+managed volume, resource limits, and a restart policy — declared as one map:
+
+    Tank.apply(%{
+      name: "api",
+      restart: :always,
+      network: %{
+        nics: [%{name: "eth0", parent: "eth0", ip: {"10.0.0.20", 24}, gateway: "10.0.0.1"}],
+        dns: ["10.0.0.1"]
+      },
+      volumes: [%{name: "state"}],
+      containers: [
+        %{
+          name: "app",
+          image: "ghcr.io/acme/api:1.4.2",
+          env: %{"PORT" => "8080"},
+          mounts: [%{volume: "state", path: "/var/lib/app"}],
+          limits: %{memory: 512 * 1024 * 1024, pids: 200, cpu: {100_000, 100_000}}
+        }
+      ]
+    })
+
+That single call pulls the image, builds the rootfs, raises a macvlan interface
+holding `10.0.0.20` on the LAN, mounts the volume, applies the cgroup limits,
+and starts the container — then keeps it running, restarting with backoff if it
+crashes. To look inside while it serves, exec a shell beside it:
+
+    Tank.exec("api", ["/bin/sh"])
+
+And the interactive flagship — a container that *is* a shell, which you can
+leave and return to without stopping it:
+
+    Tank.apply(%{
+      name: "console",
+      restart: :always,
+      containers: [%{name: "sh", image: "debian:13", command: ["/bin/bash"], tty: true}]
+    })
+
+    Tank.attach("console")     # your terminal becomes the container's bash
+    # ... press Ctrl-P Ctrl-Q to detach, leaving it running ...
+    Tank.attach("console")     # right back where you were
+
+    Tank.delete("console")     # and it's gone
+
+Everything above is desired state in Khepri with a loop converging to it. No
+imperative start, stop, or restart anywhere — just intent, and a machine that
+makes it true. That is the whole of Tank.

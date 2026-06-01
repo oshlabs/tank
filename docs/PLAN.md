@@ -479,7 +479,14 @@ extending it the same way and re-polish as needed.
   interactive container access, plus the `Tank.exec` / `Tank.attach` API behind
   it. Success criterion: start a real **debian 13** container, get an
   interactive bash TTY from the Elixir CLI, leave, and re-attach. See the
-  "Interactive console" section below for the full spec.
+  "Interactive console" section below for the full spec. *(done — `Tank.exec/3`
+  (`enter` + PTY, the container's own env) needed no Linx changes; `Tank.attach/1`
+  + container `tty:` needed two new Linx primitives, built in slice B: a detach
+  key in `Linx.Tty.attach` (`{:ok, :detached}`, default Ctrl-P Ctrl-Q) and
+  `Linx.Process.set_owner/2` (owner handoff; the exit-while-detached bridge is
+  level-triggered in `Tank.Runtime` via `info/1`). `EXAMPLES.md` grew with each
+  slice and was polished into the full showcase. Verified end-to-end on real
+  containers.)*
 - **M6 — `Tank.Host` seam.** The `Tank.Host` behaviour + `Tank.Host.Static`
   default (uplink + DNS from config); `parent: :auto`. VintageNet/Linx adapters
   are consumer-side / later.
