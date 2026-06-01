@@ -309,6 +309,15 @@ several exec sessions into the same pod at once (each from its own `iex`).
     Tank.exec("shell", ["/bin/sh", "-c", "echo hi; exit 3"])
     #=> {:ok, {:exited, 3}}
 
+You can also leave an interactive session **without** ending the command:
+press the detach sequence — `Ctrl-P` `Ctrl-Q` (docker's default) — and the call
+returns `{:ok, :detached}`, restoring your terminal while the command keeps
+running inside the container:
+
+    Tank.exec("shell", ["/bin/bash"])
+    # ... look around, then press Ctrl-P Ctrl-Q ...
+    #=> {:ok, :detached}
+
 The exec session inherits the **container's** environment — the image's `Env`
 (so `PATH` resolves against the rootfs) plus a default `TERM` for a usable
 shell — and starts in the container's working directory. Override per call:
