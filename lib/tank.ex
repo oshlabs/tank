@@ -47,13 +47,16 @@ defmodule Tank do
   """
   @spec apply(spec()) :: :ok | {:error, term()}
   def apply(spec) do
-    with {:ok, pod} <- to_pod(spec), do: Store.put_pod(pod)
+    with {:ok, pod} <- to_pod(spec),
+         :ok <- Store.put_pod(pod) do
+      nudge()
+    end
   end
 
   @doc "Remove a pod's desired state, by name or by `%Tank.Pod{}`."
   @spec delete(String.t() | Pod.t()) :: :ok | {:error, term()}
-  def delete(name) when is_binary(name), do: Store.delete_pod(name)
-  def delete(%Pod{name: name}), do: Store.delete_pod(name)
+  def delete(name) when is_binary(name), do: with(:ok <- Store.delete_pod(name), do: nudge())
+  def delete(%Pod{name: name}), do: delete(name)
 
   @doc "Fetch one declared pod by name."
   @spec get(String.t()) :: {:ok, Pod.t()} | {:error, :not_found}
@@ -82,4 +85,8 @@ defmodule Tank do
   defp to_pod(%Pod{} = pod), do: {:ok, pod}
   defp to_pod(spec) when is_map(spec) or is_list(spec), do: Pod.new(spec)
   defp to_pod(other), do: {:error, {:invalid_pod_spec, other}}
+
+  # Wake the reconciler so a write converges promptly. Best-effort: a no-op when
+  # no reconciler is running (e.g. a consumer driving Tank.Runtime directly).
+  defp nudge, do: Tank.Reconciler.nudge()
 end

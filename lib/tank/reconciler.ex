@@ -34,6 +34,8 @@ defmodule Tank.Reconciler do
 
     * `:runtime` — the runtime module (default `Tank.Runtime`); injectable for tests.
     * `:owner` — forwarded to each runtime's `:owner` (default: none).
+    * `:runtime_opts` — extra opts merged into each runtime's start (e.g.
+      `[image: [cache: …]]`).
     * `:interval` — resync period in ms (default 5000).
     * `:backoff_base` / `:backoff_cap` — restart backoff bounds in ms
       (defaults 10_000 / 300_000, per the PLAN).
@@ -90,6 +92,7 @@ defmodule Tank.Reconciler do
       sup: sup,
       runtime: Keyword.get(opts, :runtime, Tank.Runtime),
       owner: Keyword.get(opts, :owner),
+      runtime_opts: Keyword.get(opts, :runtime_opts, []),
       interval: Keyword.get(opts, :interval, :timer.seconds(5)),
       backoff_base: Keyword.get(opts, :backoff_base, :timer.seconds(10)),
       backoff_cap: Keyword.get(opts, :backoff_cap, :timer.minutes(5)),
@@ -191,8 +194,10 @@ defmodule Tank.Reconciler do
     do: Enum.reduce(specs, pods, fn pod, acc -> do_start(pod, 0, acc, state) end)
 
   defp do_start(%Pod{} = pod, retries, pods, state) do
+    runtime_opts = Keyword.merge(state.runtime_opts, owner: state.owner)
+
     child =
-      Supervisor.child_spec({state.runtime, {pod, [owner: state.owner]}},
+      Supervisor.child_spec({state.runtime, {pod, runtime_opts}},
         id: {state.runtime, pod.name},
         restart: :temporary
       )

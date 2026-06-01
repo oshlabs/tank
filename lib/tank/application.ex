@@ -20,7 +20,16 @@ defmodule Tank.Application do
   end
 
   defp children do
-    if store_enabled?(), do: [{Tank.Store, Application.get_env(:tank, :store, [])}], else: []
+    if store_enabled?() do
+      # The reconciler reads the store, so it starts after it. Its options
+      # (interval, backoff, image cache via :runtime_opts) come from config.
+      [
+        {Tank.Store, Application.get_env(:tank, :store, [])},
+        {Tank.Reconciler, Application.get_env(:tank, :reconciler, [])}
+      ]
+    else
+      []
+    end
   end
 
   # Consumers (and the test suite) that manage the store themselves set

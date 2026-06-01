@@ -34,9 +34,12 @@ defmodule Tank.ReconcilerTest do
     for pod <- Tank.list(), do: Tank.delete(pod.name)
     # Small backoff so crash-recovery is observable; a long interval so resync
     # never interferes with the backoff path under test.
+    # A distinct name so Tank.apply/delete's nudge to the default Tank.Reconciler
+    # doesn't reach this one -- these tests drive it deterministically via sync/1.
     pid =
       start_supervised!(
         {Reconciler,
+         name: :reconciler_under_test,
          runtime: StubRuntime,
          interval: :timer.hours(1),
          backoff_base: 20,

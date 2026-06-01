@@ -79,6 +79,11 @@ defmodule Tank.Runtime do
 
   @impl true
   def init({%Pod{} = pod, opts}) do
+    # Trap exits so terminate/2 runs on a supervisor :shutdown (the reconciler
+    # stops us via terminate_child) -- that's where we reap the workload and
+    # tear down the cgroup/scratch.
+    Process.flag(:trap_exit, true)
+
     case sole_container(pod) do
       {:ok, container} ->
         state = %{
@@ -193,6 +198,15 @@ defmodule Tank.Runtime do
     notify(state, {:tank, :error, {errno, stage}})
     {:stop, {:workload_error, errno, stage}, state}
   end
+
+  # The workload session is linked; with trap_exit on, its unexpected death
+  # arrives here (it normally lingers post-exit, so this means it crashed).
+  def handle_info({:EXIT, session, reason}, %{session: session} = state) do
+    notify(state, {:tank, :error, {:session_down, reason}})
+    {:stop, {:session_down, reason}, state}
+  end
+
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   # Lifecycle chatter we don't act on (PTY output, etc.).
   def handle_info({:linx_process, _}, state), do: {:noreply, state}
