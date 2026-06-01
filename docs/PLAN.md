@@ -429,6 +429,16 @@ Each milestone is a commit-and-push checkpoint. Earlier milestones de-risk the
 foundation (image pull, the rootfs spike) before the declarative layer is built
 on top.
 
+**`EXAMPLES.md` is a living document from M5.5 to the end of this plan.** Rather
+than write the showcase in one pass at the end, `tank/docs/EXAMPLES.md` grows
+incrementally: as each milestone (and each M5.5 slice) lands user-facing
+surface, that surface is folded into EXAMPLES.md. The discipline is that every
+cut stays a *user-facing showcase* — a reader sees a coherent guide to the
+features that exist, never a changelog or status log (no "added in slice X", no
+milestone codes). The final M5.5 slice (D) then revises the whole document into
+a polished, top-to-bottom showcase of Tank; later milestones (M6, M7, …) keep
+extending it the same way and re-polish as needed.
+
 - **M0 — Plan + AGENTS.md.** This document and the agent guide. *(done)*
 - **M1 — Lift the image puller.** `Tank.Image{,.Registry,.Tar,.User}` from Silo;
   pure Elixir; pull + assemble an OCI rootfs; cache; tests. Adds the `req`
