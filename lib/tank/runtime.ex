@@ -198,7 +198,7 @@ defmodule Tank.Runtime do
   defp spawn_workload(%Pod{} = pod, %Container{} = container, run) do
     Workload.spawn(
       argv: run.argv,
-      env: run.env,
+      env: tty_env(run.env, container.tty),
       cwd: run.cwd,
       namespaces: namespaces(pod.network),
       owner: self(),
@@ -207,6 +207,15 @@ defmodule Tank.Runtime do
       stdio: if(container.tty, do: :pty, else: :devnull)
     )
   end
+
+  # A `tty: true` container's main process is interactive, so give it a default
+  # `TERM` (unless the image set one) — without it readline features like Ctrl-L
+  # don't work. Mirrors what `Tank.exec` does for exec sessions.
+  defp tty_env(env, true) do
+    if Enum.any?(env, &String.starts_with?(&1, "TERM=")), do: env, else: ["TERM=xterm" | env]
+  end
+
+  defp tty_env(env, false), do: env
 
   defp namespaces(:host), do: @base_namespaces
   defp namespaces(_network), do: [:net | @base_namespaces]

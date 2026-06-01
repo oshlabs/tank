@@ -143,5 +143,43 @@ defmodule Tank.RuntimeTest do
 
       GenServer.stop(runtime)
     end
+
+    test "a tty container's main process gets a default TERM (so readline works)" do
+      p = pod("rt-term", %{command: ["/bin/sh"], tty: true})
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+      assert_receive {:tank, :running, _host_pid}, 15_000
+
+      {:ok, session} = Runtime.begin_attach(runtime, self())
+      # Ask the shell what TERM it sees. The command's output (not the echoed
+      # input, which shows the literal $TERM) carries the resolved value.
+      :ok = Linx.Process.pty_write(session, "echo MYTERM=$TERM\n")
+      assert pty_contains?("MYTERM=xterm", 5_000)
+
+      Runtime.end_attach(runtime)
+      GenServer.stop(runtime)
+    end
+  end
+
+  # Accumulate :pty_out (delivered to this process while it owns the session)
+  # until `needle` appears or the deadline passes.
+  defp pty_contains?(needle, timeout) do
+    pty_contains?(needle, "", System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp pty_contains?(needle, seen, deadline) do
+    cond do
+      String.contains?(seen, needle) ->
+        true
+
+      System.monotonic_time(:millisecond) > deadline ->
+        false
+
+      true ->
+        receive do
+          {:linx_process, :pty_out, bytes} -> pty_contains?(needle, seen <> bytes, deadline)
+        after
+          200 -> pty_contains?(needle, seen, deadline)
+        end
+    end
   end
 end
