@@ -381,6 +381,13 @@ on top.
   — there is no `Cgroup.Reconcile`. Verified end-to-end on real alpine.)*
 - **M5 — `Tank.Reconciler`.** The control loop over the Khepri projection;
   start/stop/restart; exponential backoff; self-healing; level-triggered resync.
+  *(done — Tank's own loop (not a `Linx.Reconcile.Source`: the pod composite
+  doesn't fit the converge/last_applied model). Pure `Plan.diff`; a
+  `:running`/`:backing_off`/`:terminal` status machine honouring the `:restart`
+  policy with `min(base·2ⁿ, cap)` backoff; resync timer + debounced `nudge` from
+  `Tank.apply/delete`; wired into `Tank.Application`. The loop closes:
+  `Tank.apply(pod)` → a live container with no imperative start. Verified
+  end-to-end on real alpine.)*
 - **M6 — `Tank.Host` seam.** The `Tank.Host` behaviour + `Tank.Host.Static`
   default (uplink + DNS from config); `parent: :auto`. VintageNet/Linx adapters
   are consumer-side / later.
