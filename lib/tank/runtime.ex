@@ -75,6 +75,18 @@ defmodule Tank.Runtime do
   @spec host_pid(pid()) :: {:ok, pos_integer()} | {:error, :not_running}
   def host_pid(runtime), do: GenServer.call(runtime, :host_pid)
 
+  @typedoc """
+  What `Tank.exec/3` needs to enter the container: the workload's host pid plus
+  the container's resolved `env` (image `Env` merged with the spec's) and
+  `working_dir` — so an exec session inherits the *container's* environment, not
+  the host's.
+  """
+  @type exec_context :: %{host_pid: pos_integer(), env: [String.t()], working_dir: String.t()}
+
+  @doc "The container's exec context, once `:running`. `{:error, :not_running}` before then."
+  @spec exec_context(pid()) :: {:ok, exec_context()} | {:error, :not_running}
+  def exec_context(runtime), do: GenServer.call(runtime, :exec_context)
+
   # === lifecycle ============================================================
 
   @impl true
@@ -97,7 +109,10 @@ defmodule Tank.Runtime do
           cgroup: nil,
           scratch: nil,
           rootfs: nil,
-          etc_files: []
+          etc_files: [],
+          # The container's resolved run env/cwd, stashed for Tank.exec.
+          env: [],
+          working_dir: "/"
         }
 
         {:ok, state, {:continue, :bring_up}}
@@ -129,7 +144,15 @@ defmodule Tank.Runtime do
          etc_files = Etc.materialize(state.pod, scratch),
          {:ok, session} <- spawn_workload(state.pod, run) do
       {:noreply,
-       %{state | session: session, rootfs: rootfs, scratch: scratch, etc_files: etc_files}}
+       %{
+         state
+         | session: session,
+           rootfs: rootfs,
+           scratch: scratch,
+           etc_files: etc_files,
+           env: run.env,
+           working_dir: run.cwd
+       }}
     else
       {:error, reason} -> {:stop, {:bring_up_failed, reason}, state}
     end
@@ -228,6 +251,12 @@ defmodule Tank.Runtime do
 
   def handle_call(:host_pid, _from, %{host_pid: pid} = state),
     do: {:reply, {:ok, pid}, state}
+
+  def handle_call(:exec_context, _from, %{host_pid: nil} = state),
+    do: {:reply, {:error, :not_running}, state}
+
+  def handle_call(:exec_context, _from, %{host_pid: pid} = state),
+    do: {:reply, {:ok, %{host_pid: pid, env: state.env, working_dir: state.working_dir}}, state}
 
   @impl true
   def terminate(_reason, state) do

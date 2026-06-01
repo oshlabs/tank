@@ -37,7 +37,7 @@ defmodule Tank do
 
   require Logger
 
-  alias Tank.{Pod, Store}
+  alias Tank.{Pod, Reconciler, Runtime, Store}
 
   @type spec :: Pod.t() | map() | keyword()
 
@@ -65,6 +65,84 @@ defmodule Tank do
   @doc "Every declared pod (a fast read through the store's projection)."
   @spec list() :: [Pod.t()]
   def list, do: Store.list_pods()
+
+  @doc """
+  Run an interactive command *inside* a running pod — `docker exec -it`.
+
+  Resolves the pod's running workload, starts a **second** process that enters
+  the container's namespaces (mount → its rootfs, pid → its procs, net/uts/ipc)
+  with a PTY, and hands the caller's terminal to it. Typing `exit` ends only
+  this exec session; the pod's main process keeps running. Exec again, or run
+  several at once.
+
+      Tank.exec("web", ["/bin/bash"])
+      Tank.exec("web", ["/bin/sh", "-c", "ps aux"], cwd: "/tmp")
+
+  `argv` is the command to run (its first element is the program). `opts`:
+
+    * `:cwd` — working directory inside the container. Defaults to the
+      container's `working_dir` (the image `WorkingDir`).
+    * `:env` — extra environment as `["KEY=VAL", …]`, merged *over* the
+      container's own environment. By default the exec session inherits the
+      container's resolved env (image `Env` + the spec's), exactly like
+      `docker exec` — so `PATH` resolves inside the rootfs — plus a default
+      `TERM=xterm` when the container set none, for a usable shell.
+
+  Returns the exec's terminal result — `{:ok, {:exited, code}}` /
+  `{:ok, {:signaled, signum}}` — or `{:error, reason}` (`:not_running` when the
+  pod has no live workload, or a `Linx.Process` / `Linx.Tty` setup error).
+
+  > #### Runs in the caller's process {: .info}
+  >
+  > `exec/3` blocks the calling process for the life of the session and routes
+  > the PTY through it, so call it straight from iex (or a process that owns a
+  > terminal). It is deliberately *not* a cast into another process — the byte
+  > pump must live where the terminal is.
+  """
+  @spec exec(String.t(), [String.t()], keyword()) ::
+          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
+          | {:error, term()}
+  def exec(pod_name, argv, opts \\ [])
+      when is_binary(pod_name) and is_list(argv) and argv != [] do
+    with {:ok, ctx} <- resolve_exec_context(pod_name),
+         {:ok, session} <- Linx.Process.enter(ctx.host_pid, enter_opts(ctx, argv, opts)) do
+      Linx.Tty.attach(:group_leader, session)
+    end
+  end
+
+  # Resolve a pod name to its container's exec context (host pid + env + cwd)
+  # via the reconciler's view of what's running and the owning Tank.Runtime.
+  defp resolve_exec_context(pod_name) do
+    case Map.fetch(Reconciler.running(), pod_name) do
+      {:ok, runtime} -> Runtime.exec_context(runtime)
+      :error -> {:error, :not_running}
+    end
+  end
+
+  defp enter_opts(ctx, argv, opts) do
+    [
+      argv: argv,
+      stdio: :pty,
+      auto_proceed: true,
+      cwd: Keyword.get(opts, :cwd, ctx.working_dir),
+      env: exec_env(ctx.env, Keyword.get(opts, :env, []))
+    ]
+  end
+
+  # The container's env, a default TERM when it set none (for a usable shell),
+  # then the caller's :env overrides merged on top -- last writer per key wins.
+  defp exec_env(container_env, overrides) do
+    has_term? = Enum.any?(container_env, &String.starts_with?(&1, "TERM="))
+    base = if has_term?, do: container_env, else: ["TERM=xterm" | container_env]
+    merge_env(base, overrides)
+  end
+
+  defp merge_env(base, overrides) do
+    over_keys = MapSet.new(overrides, &env_key/1)
+    Enum.reject(base, &MapSet.member?(over_keys, env_key(&1))) ++ overrides
+  end
+
+  defp env_key(kv), do: kv |> String.split("=", parts: 2) |> hd()
 
   @doc false
   # Bootstrap seed: write each spec create-if-absent, so config never clobbers
