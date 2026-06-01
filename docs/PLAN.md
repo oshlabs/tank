@@ -347,6 +347,82 @@ Khepri store, uses `Tank.Host.Static`, and runs as root for namespaces / mounts
 / netlink via the repo's `./sudorun.sh` (root `iex -S mix`) and `./sudotest.sh`
 (root test run), mirroring Linx's scripts.
 
+## Interactive console + EXAMPLES (M5.5 — the demo)
+
+This intermediate milestone makes Tank a *demonstrable* product: an extensive
+`tank/docs/EXAMPLES.md` that doubles as the showcase of Linx-used-by-Tank, plus
+the interactive-console API the flagship demo needs. **Success criterion:** from
+the Elixir CLI, start a real **debian 13** container, get an interactive bash
+TTY into it, leave, and re-attach — all documented in `EXAMPLES.md`.
+
+### Two interactive models (they are different docker verbs)
+
+**1. `exec` — `docker exec -it` (the clean, primary model).** The pod's *main*
+process is a keepalive (`/bin/cat`, `sleep infinity`, or a real service). You
+attach by running a **second** process — e.g. `/bin/bash` — that **enters the
+container's namespaces** (`Linx.Process.enter/2`) with a PTY. That exec session
+is **owned by the iex process**, so `Linx.Tty.attach(:group_leader, session)`
+works directly — *no Linx changes needed*. Typing `exit` ends only the bash; the
+container's main process keeps running. You can exec again, or run several execs
+at once.
+
+  * Tank API: `Tank.exec(pod_name, argv, opts)` — resolve the running pod's
+    host pid (via the reconciler's `running/0` → the `Tank.Runtime` → its
+    session's `host_pid`), `Linx.Process.enter(host_pid, argv:, stdio: :pty,
+    cwd:)`, then `Linx.Tty.attach(:group_leader, session)`; returns the exec's
+    exit result.
+  * Enter all of the container's namespaces (mount → its rootfs, pid → its
+    procs, net, uts, ipc) so the bash is fully *inside*. Verify when building:
+    enter + `stdio: :pty` compose (process.ex's `pty?/1` already matches both
+    `:spawn` and `:enter`); whether the PTY needs `/dev/pts` present in the
+    container rootfs (M4's `/dev` is a tmpfs with the standard nodes — may need
+    `devpts` mounted, or the slave fd is inherited and it's moot).
+
+**2. `attach` — `docker attach` (needs two Linx primitives).** The pod's *main*
+process **is** the interactive shell (`tty: true` on the container →
+`Linx.Process` `stdio: :pty` instead of `:devnull`). Attaching takes over that
+main process's PTY; since `exit` would stop the container, leaving without
+killing it requires a **detach key**. Two gaps — both genuine Linx primitives
+Tank surfaces, to be fixed *in Linx*:
+
+  * **`Linx.Tty` detach key** — a configurable escape (default Ctrl-P Ctrl-Q)
+    that returns `{:ok, :detached}` from `attach/2`, leaving the workload
+    running (today `attach/2` returns only on workload exit).
+  * **`Linx.Process` owner handoff** (`set_owner/2` or equiv) — the main session
+    is owned by `Tank.Runtime`; attaching needs PTY/lifecycle events routed to
+    the iex process for the duration, then back. Plus a bridge so a workload
+    exit *during* attach still reaches the runtime (it owns the restart policy).
+  * Tank API: `Tank.attach(pod_name)`; container option `tty: true`.
+
+### Slices
+
+  * **A — `Tank.exec` (no Linx changes).** `enter` + PTY + `Linx.Tty.attach`.
+    The flagship: debian 13 with a `/bin/cat` keepalive, exec a bash, look
+    around, `exit`, exec again. Integration test (root) + the EXAMPLES walkthrough.
+  * **B — Linx primitives for `attach`.** Detach key in `Linx.Tty.attach`;
+    `Linx.Process.set_owner/2` (+ the exit-during-attach bridge). Tests in Linx.
+  * **C — `Tank.attach` + container `tty:`.** Wire scenario 2 in Tank.
+  * **D — `tank/docs/EXAMPLES.md`.** The whole shebang (below).
+
+### `EXAMPLES.md` scope (the whole shebang)
+
+  * **Declarative basics:** `Tank.apply/1` (map *and* `%Tank.Pod{}`), `list/0`,
+    `get/1`, `delete/1`; image refs + the `{:rootfs, path}` escape hatch;
+    `command`/`args`/`env`/`working_dir` (the OCI merge, command-resets-Cmd).
+  * **Resources:** volumes (managed + host-path), limits (memory/pids/cpu),
+    restart policies (`:always`/`:on_failure`/`:never`).
+  * **Networking:** `:none`, `:host`, macvlan NIC(s) (parent, ip, gateway, dns),
+    multi-NIC pods.
+  * **The loop:** apply → running (no imperative start), crash → backoff,
+    delete → gone; the reconciler's role.
+  * **Operational:** config (`data_dir`, BYO-or-default store, seeding pods in
+    `runtime.exs`).
+  * **Interactive (the centrepiece):** `Tank.exec` (debian bash: exit + re-exec,
+    multiple concurrent execs) and `Tank.attach` (a `tty: true` debian-as-bash:
+    Ctrl-P Ctrl-Q detach + re-attach). A full flagship walkthrough start to finish.
+  * Honour the doc conventions: no `iex>`/`...>` prefixes in code blocks (paste-
+    friendly), `/bin/sh` examples where relevant, no project-tracker noise.
+
 ## Milestones
 
 Each milestone is a commit-and-push checkpoint. Earlier milestones de-risk the
@@ -388,6 +464,12 @@ on top.
   `Tank.apply/delete`; wired into `Tank.Application`. The loop closes:
   `Tank.apply(pod)` → a live container with no imperative start. Verified
   end-to-end on real alpine.)*
+- **M5.5 — Interactive console + `EXAMPLES.md` (the demo).** Tank's showcase:
+  an extensive `tank/docs/EXAMPLES.md` covering declarative pod management *and*
+  interactive container access, plus the `Tank.exec` / `Tank.attach` API behind
+  it. Success criterion: start a real **debian 13** container, get an
+  interactive bash TTY from the Elixir CLI, leave, and re-attach. See the
+  "Interactive console" section below for the full spec.
 - **M6 — `Tank.Host` seam.** The `Tank.Host` behaviour + `Tank.Host.Static`
   default (uplink + DNS from config); `parent: :auto`. VintageNet/Linx adapters
   are consumer-side / later.
