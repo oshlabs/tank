@@ -58,21 +58,34 @@ defmodule Tank.RuntimeTest do
     GenServer.stop(runtime)
   end
 
-  test "the supervisor restarts the composite on workload death (restart: :on_failure)" do
-    {:ok, sup} = start_supervised({DynamicSupervisor, strategy: :one_for_one, max_restarts: 5})
+  test "a workload killed by a signal stops under a :shutdown reason" do
+    # The reconciler restarts off this reason (any non-:normal reason → restart
+    # per policy); the :shutdown wrapper keeps OTP from logging a crash report.
+    Process.flag(:trap_exit, true)
 
-    # owner: self() is stable across restarts (the child spec is re-run with the
-    # same opts), so each fresh composite reports its :running back to us.
-    p = pod("rt-restart", %{command: ["/bin/sleep", "60"]}, %{restart: :on_failure})
-    {:ok, _} = DynamicSupervisor.start_child(sup, {Runtime, {p, [owner: self()]}})
+    p = pod("rt-signal", %{command: ["/bin/sleep", "60"]})
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+    assert_receive {:tank, :running, host_pid}, 15_000
+    ref = Process.monitor(runtime)
 
-    assert_receive {:tank, :running, host_pid1}, 15_000
+    {_, 0} = System.cmd("kill", ["-KILL", Integer.to_string(host_pid)])
 
-    # Kill the workload out of band; the composite dies and is restarted fresh.
-    {_, 0} = System.cmd("kill", ["-KILL", Integer.to_string(host_pid1)])
+    assert_receive {:DOWN, ^ref, :process, ^runtime, reason}, 15_000
+    assert reason == {:shutdown, {:workload_signaled, 9}}
+  end
 
-    assert_receive {:tank, :running, host_pid2}, 15_000
-    assert host_pid2 != host_pid1
+  test "a non-zero workload exit stops under a :shutdown reason (no crash report)" do
+    # The workload ending is an expected outcome, not a Runtime crash, so the
+    # GenServer stops under {:shutdown, _} — OTP logs no crash report — while the
+    # reconciler still sees a non-:normal reason and restarts per policy.
+    Process.flag(:trap_exit, true)
+
+    p = pod("rt-exit-code", %{command: ["/bin/sh", "-c", "exit 3"]}, %{restart: :never})
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+    ref = Process.monitor(runtime)
+
+    assert_receive {:DOWN, ^ref, :process, ^runtime, reason}, 15_000
+    assert reason == {:shutdown, {:workload_exited, 3}}
   end
 
   describe "attach handoff (tty: true)" do

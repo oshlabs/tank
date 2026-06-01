@@ -27,9 +27,12 @@ defmodule Tank.Runtime do
     * `{:tank, :exited, code}` / `{:tank, :signaled, signum}` /
       `{:tank, :error, reason}` — terminal.
 
-  The GenServer stops when its workload terminates (clean exit → `:normal`,
-  otherwise abnormal), so a supervisor restarts the whole composite — a fresh
-  rootfs and namespace built from scratch — per the pod's `:restart` policy.
+  The GenServer stops when its workload terminates: a clean exit → `:normal`, a
+  non-zero exit or signal → `{:shutdown, {:workload_exited | :workload_signaled,
+  …}}` (an expected outcome, so OTP logs no crash report), and a genuine setup
+  or session failure → an abnormal reason. The reconciler reads the reason and
+  rebuilds the whole composite — a fresh rootfs and namespace — per the pod's
+  `:restart` policy.
 
   ## Options
 
@@ -51,21 +54,22 @@ defmodule Tank.Runtime do
 
   # === API ==================================================================
 
-  @doc "Supervisor child spec; restart type derived from the pod's :restart policy."
+  @doc """
+  Supervisor child spec. `restart: :temporary` — OTP never restarts a runtime;
+  `Tank.Reconciler` owns restart (it monitors the runtime and acts on the stop
+  reason per the pod's `:restart` policy). Pod policy lives in the reconciler,
+  not the child spec.
+  """
   def child_spec({%Pod{} = pod, opts}) do
     %{
       id: {__MODULE__, pod.name},
       start: {__MODULE__, :start_link, [pod, opts]},
-      restart: restart_type(pod.restart),
+      restart: :temporary,
       type: :worker
     }
   end
 
   def child_spec(%Pod{} = pod), do: child_spec({pod, []})
-
-  defp restart_type(:always), do: :permanent
-  defp restart_type(:on_failure), do: :transient
-  defp restart_type(:never), do: :temporary
 
   @doc "Start and bring up one pod. See the moduledoc for options."
   @spec start_link(Pod.t(), keyword()) :: GenServer.on_start()
@@ -233,14 +237,17 @@ defmodule Tank.Runtime do
     {:stop, :normal, state}
   end
 
+  # A non-zero exit / a signal is an expected workload outcome, not a Runtime
+  # crash — stop under a `:shutdown` reason so OTP doesn't log a crash report.
+  # The reconciler still sees a non-`:normal` reason and restarts per policy.
   def handle_info({:linx_process, :exited, code}, state) do
     notify(state, {:tank, :exited, code})
-    {:stop, {:workload_exited, code}, state}
+    {:stop, {:shutdown, {:workload_exited, code}}, state}
   end
 
   def handle_info({:linx_process, :signaled, signum}, state) do
     notify(state, {:tank, :signaled, signum})
-    {:stop, {:workload_signaled, signum}, state}
+    {:stop, {:shutdown, {:workload_signaled, signum}}, state}
   end
 
   def handle_info({:linx_process, :error, errno, stage}, state) do
@@ -324,12 +331,12 @@ defmodule Tank.Runtime do
 
   defp reclaim_terminal({:exited, code}, state) do
     notify(state, {:tank, :exited, code})
-    {:stop, {:workload_exited, code}, :ok, state}
+    {:stop, {:shutdown, {:workload_exited, code}}, :ok, state}
   end
 
   defp reclaim_terminal({:signaled, signum}, state) do
     notify(state, {:tank, :signaled, signum})
-    {:stop, {:workload_signaled, signum}, :ok, state}
+    {:stop, {:shutdown, {:workload_signaled, signum}}, :ok, state}
   end
 
   defp reclaim_terminal(other, state) do
