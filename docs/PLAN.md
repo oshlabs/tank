@@ -497,6 +497,9 @@ extending it the same way and re-polish as needed.
   consumes today — host IP facts + change-notifications land with the VintageNet
   adapter that needs them. Verified on real netns/macvlan.)*
 - **M7 — Multi-container pods.** Sidecars sharing the pod's netns and lifetime.
+  *(needs design refinement before starting — see "Multi-container pods (M7)"
+  under Risks / open questions. The central unknown is whether `Linx.Process`
+  needs a new primitive or whether existing verbs compose.)*
 
 **Later (post-graduation):** bridge+NAT networking (`Linx.Netfilter`),
 DHCP-client-in-netns, `userns` root-remap + idmapped rootfs, overlayfs layer
@@ -534,3 +537,31 @@ repository.
   output fd wired up *before* the pivot (a pre-connected fd inherited across
   exec, or a Linx.Process option for it). Out of M4 scope (M4 sends container
   stdio to `/dev/null`); revisit when logging is built.
+
+- **Multi-container pods (M7) — needs design refinement before we start.** A pod
+  is several containers sharing *some* namespaces (net, ipc, uts — and the
+  pod's lifetime) while each keeps its *own* mount (own rootfs) and, by default,
+  its own pid. Today `Tank.Runtime` runs exactly one container (`sole_container/1`
+  warns and drops the rest), and the open questions are real:
+
+  - **The core Linx question (charter territory).** `Linx.Process` currently does
+    either *all-fresh* (`spawn` clones with selected `CLONE_NEW*` flags) or
+    *all-join* (`enter` setns'es into **all** of a target's namespaces). A sidecar
+    needs a **hybrid**: create a fresh mount + pid namespace while **joining** the
+    pod's existing net/ipc/uts. Can that be composed from existing verbs, or does
+    `Linx.Process` need a new capability — e.g. `spawn` taking "create these
+    namespaces fresh, join these of pid X" (setns the chosen namespaces in the
+    agent, then clone with the remaining `CLONE_NEW*` flags)? Decide this *first*;
+    it drives everything else. Surface the gap in Linx, don't paper over it.
+  - **Who owns the shared namespaces and the lifetime.** K8s uses a tiny *pause /
+    infra container* that holds the pod's namespaces so app containers can come
+    and go without tearing the netns down. Do we adopt that, or let the first
+    ("infra") container own them — and what happens to the pod when it dies?
+  - **Restart granularity.** Per-container restart within a live pod, or
+    whole-pod restart (today's composite model)? This interacts with the
+    reconciler's status machine and backoff.
+  - **Cgroups & volumes.** Per-container cgroups nested under one pod cgroup; a
+    pod volume mounted into several containers' rootfses.
+
+  Resolve the Linx question (likely a small spike against the C port) and the
+  pause-container decision before writing M7.
