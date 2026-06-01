@@ -7,6 +7,10 @@ import Config
 # that run their own store, and the test suite, set this to false.
 config :tank, start_store?: true
 
+# The host-config adapter (uplink + DNS facts). The default reads them from
+# config; a consumer (e.g. TankOS) swaps in its own. See `Tank.Host`.
+config :tank, host: Tank.Host.Static
+
 if config_env() == :test do
   import_config "test.exs"
 end

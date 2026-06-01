@@ -22,7 +22,7 @@ defmodule Tank.Runtime.Network do
 
   alias Linx.Netlink.{Rtnl, Socket}
   alias Linx.Netlink.Rtnl.{Address, Link, Route}
-  alias Tank.Nic
+  alias Tank.{Host, Nic}
   alias Tank.Pod.Network
 
   @doc "Configure the netns of the container parked at `host_pid`."
@@ -44,9 +44,12 @@ defmodule Tank.Runtime.Network do
 
   # --- one NIC -------------------------------------------------------------
 
-  defp setup_nic(_host_pid, %Nic{parent: :auto}) do
-    # `:auto` parent resolution is Tank.Host's job (M6); not available yet.
-    {:error, {:parent_auto_unsupported, "set an explicit :parent until Tank.Host (M6)"}}
+  defp setup_nic(host_pid, %Nic{parent: :auto} = nic) do
+    # Resolve the host uplink via the Tank.Host seam, then build as usual.
+    case Host.uplink() do
+      {:ok, parent} -> setup_nic(host_pid, %{nic | parent: parent})
+      {:error, reason} -> {:error, {:no_uplink, reason}}
+    end
   end
 
   defp setup_nic(host_pid, %Nic{mode: :macvlan} = nic) do

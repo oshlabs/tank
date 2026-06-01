@@ -95,10 +95,36 @@ defmodule Tank.Runtime.NetworkTest do
     assert :ok = Net.setup(1, :host)
   end
 
-  test "an :auto parent is rejected until Tank.Host (M6)" do
+  test "an :auto parent resolves the uplink via the Tank.Host seam" do
+    original = Application.get_env(:tank, Tank.Host.Static)
+    Application.put_env(:tank, Tank.Host.Static, uplink: @parent)
+
+    on_exit(fn ->
+      if original,
+        do: Application.put_env(:tank, Tank.Host.Static, original),
+        else: Application.delete_env(:tank, Tank.Host.Static)
+    end)
+
     {session, host_pid} = spawn_netns()
     net = Network.new!(%{nics: [%{name: "eth0", parent: :auto, ip: {"10.99.0.7", 24}}]})
-    assert {:error, {:parent_auto_unsupported, _}} = Net.setup(host_pid, net)
+
+    assert :ok = Net.setup(host_pid, net)
+    assert "eth0" in links_in_netns(host_pid)
+    assert ~IP"10.99.0.7" in addresses_in_netns(host_pid, "eth0")
+
+    Linx.Process.abort(session)
+  end
+
+  test "an :auto parent fails clearly when no uplink is configured" do
+    original = Application.get_env(:tank, Tank.Host.Static)
+    Application.delete_env(:tank, Tank.Host.Static)
+    on_exit(fn -> if original, do: Application.put_env(:tank, Tank.Host.Static, original) end)
+
+    {session, host_pid} = spawn_netns()
+    net = Network.new!(%{nics: [%{name: "eth0", parent: :auto, ip: {"10.99.0.8", 24}}]})
+
+    assert {:error, {:no_uplink, :no_uplink_configured}} = Net.setup(host_pid, net)
+
     Linx.Process.abort(session)
   end
 end

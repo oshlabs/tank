@@ -200,10 +200,13 @@ The opinionated v1 model gives a container its own MAC and a real LAN IP via
       containers: [%{name: "app", image: "nginx:1.27"}]
     })
 
-  * `parent:` is the host uplink the macvlan attaches to.
+  * `parent:` is the host uplink the macvlan attaches to. It defaults to
+    `:auto`, which resolves to the configured host uplink (see
+    [Operational config](#operational-config)) — so you usually omit it.
   * `ip:` is `{address, prefix}` — a static IPv4 address and CIDR prefix.
   * `gateway:` adds a default route (optional).
-  * `dns:` is pod-level — it becomes the container's `/etc/resolv.conf`.
+  * `dns:` is pod-level — it becomes the container's `/etc/resolv.conf`. Omit it
+    and the container inherits the host's DNS.
 
 A pod's netns can hold several NICs, e.g. one per uplink:
 
@@ -281,6 +284,23 @@ machine, so the boot seed never clobbers state you changed at runtime:
 Config is a *starting point*, not a live mirror: removing a pod is
 `Tank.delete/1`, not deleting it from config. Runtime changes persist across
 reboots.
+
+### Host network facts
+
+Tank reads two facts about the *host's* network — the uplink a macvlan attaches
+to (resolving `parent: :auto`) and the DNS servers a container inherits — through
+a swappable adapter, so it shares them without owning host networking. The
+default adapter reads them from config:
+
+    config :tank, Tank.Host.Static,
+      uplink: "eth0",
+      dns: ["10.0.0.1"]
+
+With this set, a NIC can omit `parent:` (it defaults to `:auto`) and a pod can
+omit `dns:` — both fall back to these host facts. A consumer that manages host
+networking itself (e.g. a Nerves device reading VintageNet) points
+`config :tank, host: MyHostAdapter` at its own `Tank.Host` implementation; Tank
+core never depends on it.
 
 ## Interactive containers
 

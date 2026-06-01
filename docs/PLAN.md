@@ -489,7 +489,13 @@ extending it the same way and re-polish as needed.
   containers.)*
 - **M6 — `Tank.Host` seam.** The `Tank.Host` behaviour + `Tank.Host.Static`
   default (uplink + DNS from config); `parent: :auto`. VintageNet/Linx adapters
-  are consumer-side / later.
+  are consumer-side / later. *(done — `Tank.Host` is the behaviour *and* the
+  facade that dispatches to the configured adapter (`config :tank, host:`),
+  default `Tank.Host.Static` (uplink + DNS from `config :tank, Tank.Host.Static`).
+  `parent: :auto` resolves the uplink in `Runtime.Network`; an empty pod `dns:`
+  inherits the host's in `Runtime.Etc`. The contract is just the two facts Tank
+  consumes today — host IP facts + change-notifications land with the VintageNet
+  adapter that needs them. Verified on real netns/macvlan.)*
 - **M7 — Multi-container pods.** Sidecars sharing the pod's netns and lifetime.
 
 **Later (post-graduation):** bridge+NAT networking (`Linx.Netfilter`),
