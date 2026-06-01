@@ -100,13 +100,28 @@ defmodule Tank do
   > pump must live where the terminal is.
   """
   @spec exec(String.t(), [String.t()], keyword()) ::
-          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
+          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()} | :detached}
           | {:error, term()}
   def exec(pod_name, argv, opts \\ [])
       when is_binary(pod_name) and is_list(argv) and argv != [] do
     with {:ok, ctx} <- resolve_exec_context(pod_name),
          {:ok, session} <- Linx.Process.enter(ctx.host_pid, enter_opts(ctx, argv, opts)) do
-      Linx.Tty.attach(:group_leader, session)
+      tty_attach(session)
+    end
+  end
+
+  # Hand the caller's terminal to `session`, picking the mode that fits the
+  # terminal. `:controlling` (a local tty) is preferred: it reads /dev/tty in
+  # raw mode, so Ctrl-C reaches the *container's* foreground process as SIGINT
+  # rather than tripping the BEAM's own break handler — and it gets real
+  # SIGWINCH resize. Over SSH/`:remsh` there is no local tty, so `attach`
+  # refuses with `:no_local_tty` and we fall back to the universal
+  # `:group_leader` pump (which has its own ssh_cli-aware Ctrl-C handling).
+  # Both modes honour the default Ctrl-P Ctrl-Q detach.
+  defp tty_attach(session) do
+    case Linx.Tty.attach(:controlling, session) do
+      {:error, :no_local_tty} -> Linx.Tty.attach(:group_leader, session)
+      result -> result
     end
   end
 
@@ -184,7 +199,7 @@ defmodule Tank do
   defp attach_session(runtime) do
     with {:ok, session} <- Runtime.begin_attach(runtime, self()) do
       try do
-        Linx.Tty.attach(:group_leader, session)
+        tty_attach(session)
       after
         Runtime.end_attach(runtime)
       end
