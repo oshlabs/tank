@@ -1,6 +1,8 @@
 defmodule Tank.ImageTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   @ref "alpine:latest"
 
   # A persistent cache shared across runs, so repeated runs don't re-download
@@ -18,6 +20,25 @@ defmodule Tank.ImageTest do
 
       assert {:error, {:not_cached, "registry-1.docker.io/library/alpine:latest"}} =
                Tank.Image.pull(@ref, cache: empty, offline: true)
+    end
+
+    test "with no :cache, the cache dir comes from config :tank, image_cache" do
+      empty =
+        Path.join(System.tmp_dir!(), "tank-image-cfg-#{System.unique_integer([:positive])}")
+
+      previous = Application.get_env(:tank, :image_cache)
+      Application.put_env(:tank, :image_cache, empty)
+
+      on_exit(fn ->
+        File.rm_rf!(empty)
+
+        if previous,
+          do: Application.put_env(:tank, :image_cache, previous),
+          else: Application.delete_env(:tank, :image_cache)
+      end)
+
+      # No :cache option → default_cache reads the configured (empty) dir → miss.
+      assert {:error, {:not_cached, _}} = Tank.Image.pull(@ref, offline: true)
     end
   end
 
@@ -62,6 +83,27 @@ defmodule Tank.ImageTest do
                Tank.Image.pull(@ref, cache: @cache, offline: true)
 
       assert is_list(config["config"]["Cmd"])
+    end
+
+    test "logs honestly: 'pulling' on a miss, 'using cached' on a hit" do
+      fresh =
+        Path.join(System.tmp_dir!(), "tank-image-log-#{System.unique_integer([:positive])}")
+
+      previous = Logger.level()
+      Logger.configure(level: :info)
+
+      on_exit(fn ->
+        File.rm_rf!(fresh)
+        Logger.configure(level: previous)
+      end)
+
+      miss = capture_log(fn -> assert {:ok, _} = Tank.Image.pull(@ref, cache: fresh) end)
+      assert miss =~ "tank: pulling"
+      refute miss =~ "using cached"
+
+      hit = capture_log(fn -> assert {:ok, _} = Tank.Image.pull(@ref, cache: fresh) end)
+      assert hit =~ "tank: using cached"
+      refute hit =~ "tank: pulling"
     end
   end
 end

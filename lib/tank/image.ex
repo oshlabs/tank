@@ -15,7 +15,8 @@ defmodule Tank.Image do
 
   ## Caching
 
-  Everything is cached under `~/.cache/tank` (override with `:cache`):
+  Everything is cached on disk and survives restarts. The directory is the
+  `:cache` option, else `config :tank, image_cache: …`, else `~/.cache/tank`:
 
     * `blobs/<algo>/<hex>` — layer and config blobs, content-addressed;
     * `rootfs/<digest>` — the assembled rootfs, keyed by the image manifest
@@ -24,6 +25,10 @@ defmodule Tank.Image do
       manifest digest and parsed config, written on every successful online
       pull. It is what lets a fully-cached image be served with **no network
       I/O at all** via `offline: true`.
+
+  An online pull always resolves the manifest (to follow a moving tag), but the
+  heavy layer data downloads only on a cache miss — the log says `pulling` then,
+  and `using cached <ref> (<digest>)` on a hit.
 
   Layers extract as the user running the BEAM, so a pulled image satisfies a
   root-remapped (userns) rootfs-ownership rule with no `chown`.
@@ -46,7 +51,8 @@ defmodule Tank.Image do
   @typedoc """
   Options for `pull/2`:
 
-    * `:cache` — cache directory (default `~/.cache/tank`).
+    * `:cache` — cache directory (default: `config :tank, image_cache: …`, else
+      `~/.cache/tank`).
     * `:offline` — when `true`, never touch the network: resolve the manifest,
       config and rootfs entirely from cache, returning
       `{:error, {:not_cached, ref}}` if the image isn't there. Default `false`.
@@ -93,17 +99,29 @@ defmodule Tank.Image do
   end
 
   defp pull_online(parsed, cache, refresh) do
-    Logger.info("tank: pulling #{ref_string(parsed)}")
-
     with {:ok, top, token} <-
            Registry.manifest(parsed.registry, parsed.repo, parsed.reference),
          {:ok, image} <- resolve_platform(parsed, top, token),
+         _ = log_resolution(parsed, image.digest, cached_rootfs?(cache, image.digest, refresh)),
          {:ok, config} <- fetch_config(parsed, image, token, cache, refresh),
          {:ok, rootfs} <- assemble_rootfs(parsed, image, token, cache, refresh) do
       write_ref(cache, parsed, image.digest, config)
       {:ok, %{rootfs: rootfs, config: config}}
     end
   end
+
+  # Honest logging: the manifest is resolved over the network every time (to
+  # follow a moving tag), but the heavy layer data is downloaded only on a miss.
+  defp cached_rootfs?(cache, digest, refresh), do: not refresh and File.dir?(rootfs_path(cache, digest))
+
+  defp log_resolution(parsed, digest, true),
+    do: Logger.info("tank: using cached #{ref_string(parsed)} (#{short_digest(digest)})")
+
+  defp log_resolution(parsed, _digest, false),
+    do: Logger.info("tank: pulling #{ref_string(parsed)}")
+
+  defp short_digest("sha256:" <> hex), do: "sha256:" <> String.slice(hex, 0, 12)
+  defp short_digest(digest), do: digest
 
   # --- manifest / platform --------------------------------------------------
 
@@ -333,7 +351,14 @@ defmodule Tank.Image do
     end
   end
 
+  # The cache directory when the caller passes no `:cache`. A plain configurable
+  # path (`config :tank, image_cache: …`), independent of the data dir; falls
+  # back to the XDG user cache (`~/.cache/tank`).
   defp default_cache do
+    Application.get_env(:tank, :image_cache) || xdg_cache()
+  end
+
+  defp xdg_cache do
     base = System.get_env("XDG_CACHE_HOME") || Path.join(System.user_home!(), ".cache")
     Path.join(base, "tank")
   end
