@@ -1,11 +1,10 @@
 defmodule Tank.MixProject do
   use Mix.Project
 
-  # Tank is a proof-of-concept *consumer* of Linx, not part of the Linx
-  # package. It lives in this nested app — with a path dependency on the
-  # parent — so it can only reach Linx's public API, never its internals.
-  # Lifting it into its own repo later is `git mv tank ../tank` plus flipping
-  # the dep below to `{:linx, "~> x.y"}`.
+  # Tank is a *consumer* of Linx, not part of the Linx package. It depends on
+  # Linx via a path dependency on a sibling checkout (`../linx`) so it can only
+  # reach Linx's public API, never its internals. When Linx is published, this
+  # flips to a hex dependency `{:linx, "~> x.y"}`.
 
   def project do
     [
@@ -26,7 +25,7 @@ defmodule Tank.MixProject do
 
   defp deps do
     [
-      {:linx, path: ".."},
+      {:linx, path: "../linx"},
       # HTTP client for the OCI registry client (Tank.Image.Registry).
       {:req, "~> 0.5"},
       # Tree-structured, Raft-replicated desired-state store (Tank.Store).
