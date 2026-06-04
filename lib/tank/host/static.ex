@@ -1,7 +1,7 @@
 defmodule Tank.Host.Static do
   @moduledoc """
   The default `Tank.Host`: uplink + DNS read straight from application config.
-  Runs anywhere — a laptop, a device — with no host-network integration.
+  Runs anywhere, with no host-network integration.
 
       config :tank, Tank.Host.Static,
         uplink: "eth0",

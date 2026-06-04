@@ -174,7 +174,7 @@ keeps its stuff" — plain Application env / `runtime.exs`:
 
     config :tank, data_dir: "/var/lib/tank"   # images/, volumes/, run/ live here
 
-On a laptop this defaults to a user cache dir (e.g. `~/.cache/tank`). The
+Standalone, this defaults to a user cache dir (e.g. `~/.cache/tank`). The
 Khepri/Ra data dir specifically is owned by the *consumer* (which sets it
 on-device, flash-wear aware); standalone Tank's default store gets a dir under
 `data_dir`.
@@ -303,7 +303,7 @@ Linx-side addition.
 
 Tank must *share certain aspects* of host networking without owning them — and
 without dragging in any host-networking dependency, because Tank must also run
-standalone on a plain Linux laptop. So `Tank.Host` is a **behaviour** (an adapter
+standalone. So `Tank.Host` is a **behaviour** (an adapter
 contract), and **Tank core has zero compile-time dependency on the consumer's
 networking stack**. The contract exposes:
 
@@ -314,13 +314,13 @@ networking stack**. The contract exposes:
 Adapters:
 
 - **`Tank.Host.Static`** — shipped in Tank, the v1 default: uplink + DNS read
-  straight from config. Runs anywhere, laptop included.
+  straight from config. Runs anywhere.
 - **A consumer-provided adapter** — lives in the consumer (or a tiny optional
   sibling package), never in Tank's deps. Reads the host's own network manager
   (addresses, name servers, per-interface connection state) and subscribes to
   its change events.
 - **`Tank.Host.Linx`** *(later)* — auto-detect uplink + DNS from rtnetlink and
-  `/etc/resolv.conf`; a zero-config Linux/laptop default.
+  `/etc/resolv.conf`; a zero-config default.
 
 All behind the same behaviour, so nothing on the Tank side changes when the
 consumer swaps adapters. Tank never configures the host's uplink; it only reads
@@ -340,8 +340,7 @@ responsibilities, kept out of the Tank library:
 Tank stays liftable into its own repository: `git mv tank ../tank` plus flipping
 `{:linx, path: ".."}` to `{:linx, "~> x.y"}`.
 
-**Standalone, off-device.** Tank is a first-class standalone app — the primary
-dev loop is a plain Linux laptop, not a device. There it starts its own default
+**Standalone.** Tank is a first-class standalone app. It starts its own default
 Khepri store, uses `Tank.Host.Static`, and runs as root for namespaces / mounts
 / netlink via the repo's `./sudorun.sh` (root `iex -S mix`) and `./sudotest.sh`
 (root test run), mirroring Linx's scripts.

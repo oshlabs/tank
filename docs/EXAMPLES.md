@@ -9,10 +9,7 @@ toward it, keeping it there across drift, crashes, and reboots.
 It is the Kubernetes shape collapsed to a single node: **you never imperatively
 start a container.** You state intent with `Tank.apply/1`, and the loop makes
 reality match — start, restart-with-backoff, stop — until you change the intent.
-Tank is deliberately opinionated (macvlan networking, one consistent state tree)
-so an embedded device — its home is an embedded device OS — gets a runtime
-rather than a kit of parts. It also runs standalone on a plain Linux laptop,
-which is where these examples run.
+Tank is deliberately opinionated: macvlan networking, one consistent state tree.
 
 This guide walks the whole surface, from a one-line pod to an interactive shell
 inside a running container.
@@ -241,8 +238,8 @@ run stably. Delete the desired state and the pod is gone:
 
     Tank.delete("ticker")
 
-This is the Kubernetes shape, collapsed to one node: desired state is the
-source of truth, and a control loop is the only thing that touches reality.
+Desired state is the source of truth; a control loop is the only thing that
+touches reality.
 
 ## Operational config
 
@@ -270,7 +267,7 @@ default store or attaches to one a consumer already runs:
 
 With `:data_dir` set, Tank owns the store's lifecycle; with only `:store_id`,
 Tank assumes the consumer manages it. This is the "bring-your-own-or-boot-a-
-default" pattern — a device OS owns the store; a laptop lets Tank boot one.
+default" pattern.
 
 ### Seeding pods at boot
 
@@ -457,6 +454,6 @@ leave and return to without stopping it:
 
     Tank.delete("console")     # and it's gone
 
-Everything above is desired state in Khepri with a loop converging to it. No
-imperative start, stop, or restart anywhere — just intent, and a machine that
-makes it true. That is the whole of Tank.
+Everything above is desired state in Khepri with a loop converging to it: no
+imperative start, stop, or restart anywhere — just intent, and a loop that
+makes it true.

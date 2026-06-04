@@ -3,8 +3,8 @@ defmodule Tank do
   Tank — an opinionated, declarative container orchestrator built on Linx.
 
   You describe the pods that should run as Elixir data; Tank persists that
-  desired state in Khepri and (from M4 on) a level-triggered loop converges the
-  device to it. This module is the **runtime write API** over the desired state:
+  desired state in Khepri and a level-triggered loop converges the machine to
+  it. This module is the **runtime write API** over the desired state:
 
       Tank.apply(%{
         name: "web",
