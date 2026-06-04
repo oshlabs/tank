@@ -1,63 +1,97 @@
-# Tank — a proof-of-concept Linx consumer
+# Tank
 
-Tank is **not** part of the Linx package. It is a nested mix app that exists to
-validate one thing: that Linx's *public* primitives are sufficient to build the
-cross-subsystem composite that, by design, can only live in a consumer —
-"this container should exist, with this network, in its own namespace, and be
-restarted if it crashes."
+[![CI](https://github.com/oshlabs/tank/actions/workflows/ci.yml/badge.svg)](https://github.com/oshlabs/tank/actions/workflows/ci.yml)
 
-That object spans `Linx.Process` and `Linx.Netlink.Rtnl`, so it cannot live in
-Linx itself. Tank builds it, and in doing so acts as the **acceptance test** for
-the Linx reconcile work: if Tank ever needs something Linx doesn't expose,
-that's a real gap in the primitives — surfaced early, here.
+**A declarative container orchestrator for Linux, built on [Linx](https://hex.pm/packages/linx).**
 
-## Public API only, by construction
+You describe the *pods* that should run — their image, network, resources, and
+restart policy — as plain Elixir data. Tank persists that desired state in an
+embedded [Khepri](https://hex.pm/packages/khepri) store, and a reconcile loop
+converges the machine toward it, keeping it there across drift, crashes, and
+reboots. It is the Kubernetes shape collapsed to a single node: **you never
+imperatively start a container** — you state intent with `Tank.apply/1`, and the
+loop makes reality match.
 
-Tank depends on Linx via a *path* dependency (`{:linx, path: ".."}`), as a
-separate OTP application. It therefore reaches **only Linx's public API**,
-never its internals — the boundary is enforced structurally, not by
-discipline. Lifting Tank into its own repository later is:
+Tank is a *consumer* of Linx, not part of it. The cross-subsystem "container"
+object — spawn into namespaces, reconcile the network from the host, supervise
+the whole thing — is composed entirely from Linx's **public** primitives
+(`Linx.Process`, `Linx.Netlink.Rtnl`) plus OTP supervision and a Khepri store.
+By design that composite can't live in a primitives library, so it lives here.
 
-```
-git mv tank ../tank
-# then change tank/mix.exs:  {:linx, path: ".."}  ->  {:linx, "~> x.y"}
-```
+Tank's home is **TankOS**, a [Nerves](https://nerves-project.org) device OS, but
+it runs standalone on a plain Linux host too.
 
-…and nothing else.
+> ⚠️ **Early-stage (0.x).** Tank is a working proof of concept maturing into a
+> real orchestrator; the API may change between minor releases until 1.0.
 
-## What it composes (`Tank.Container`)
-
-1. **`Linx.Process`** spawns the workload into a fresh network namespace and
-   parks it at the `:ready` checkpoint.
-2. **`Linx.Netlink.Rtnl` + `Rtnl.Reconcile`** configure that namespace from the
-   host while the workload waits — bring interfaces up, converge the desired
-   addresses and routes — then the workload `proceed`s.
-3. **OTP supervision** restarts the whole composite on an abnormal exit, with a
-   brand-new namespace reconfigured from scratch (lifetime = ownership: the
-   network dies and is reborn with the container).
+## Installation
 
 ```elixir
-children = [
-  {Tank.Container,
-   %{argv: ["/usr/bin/myd"], namespaces: [:net],
-     network: %{up: ["lo"], addresses: [{"lo", "10.0.0.1", 32}]},
-     owner: MyApp.Events}}
-]
-Supervisor.start_link(children, strategy: :one_for_one)
+def deps do
+  [
+    {:tank, "~> 0.1"}
+  ]
+end
 ```
 
-## Running
+### Requirements
 
-The composite needs real namespaces, so the tests need root:
+- **Linux.** Tank drives kernel namespaces, mounts, and network interfaces, so
+  it runs only on Linux and needs privileges to configure them (root, or the
+  appropriate capabilities).
+- **Erlang/OTP 28 or earlier.** Tank's store uses Khepri, whose Horus dependency
+  cannot yet extract stored functions under OTP 29. Run on OTP 28 until that
+  support lands upstream.
 
+## A taste
+
+```elixir
+# State intent — the reconciler brings the pod up and keeps it up.
+Tank.apply(%{
+  name: "web",
+  restart: :always,
+  network: %{
+    nics: [%{name: "eth0", parent: "eth0", ip: {"10.0.0.5", 24}, gateway: "10.0.0.1"}],
+    dns: ["10.0.0.1"]
+  },
+  containers: [%{name: "app", image: "nginx:1.27"}]
+})
+
+Tank.list()        #=> [%Tank.Pod{name: "web", ...}]
+Tank.exec("web", ["/bin/sh"])   # a shell beside the running container
+Tank.delete("web") #=> :ok   (the reconciler tears it down)
 ```
+
+A pod is one network namespace holding one or more containers; `apply/1` is
+create-or-replace and validates the map into a `%Tank.Pod{}` up front. The full
+surface — images and the OCI command/env merge, volumes and mounts, cgroup
+limits, macvlan networking, the reconcile loop, boot seeding, and interactive
+`exec`/`attach` — is in **[Tank by example](docs/EXAMPLES.md)**.
+
+## What it composes
+
+For each pod, on every (re)start:
+
+1. **`Linx.Process`** spawns the workload into fresh namespaces and parks it at
+   the `:ready` checkpoint.
+2. **`Linx.Netlink.Rtnl` + `Rtnl.Reconcile`** configure that namespace from the
+   host while the workload waits — raise interfaces, converge the desired
+   addresses and routes — then the workload `proceed`s.
+3. **OTP supervision + the reconciler** restart the composite on an abnormal
+   exit, with a brand-new namespace reconfigured from scratch (lifetime =
+   ownership: the network dies and is reborn with the container).
+
+## Running the tests
+
+The reconcile path needs real namespaces, so the integration tests need root:
+
+```sh
 mix deps.get
-sudo ./sudotest.sh          # = sudo mix test --include integration
+sudo ./sudotest.sh
 ```
 
-## Scope
+The non-privileged suite runs under a plain `mix test`.
 
-A proof of concept, not a finished orchestrator: one container, network on
-existing interfaces (loopback, or a parent already moved in). veth-pair
-plumbing, multi-container coordination, and a persisted desired-state store are
-the natural next steps once Tank graduates out of the Linx tree.
+## License
+
+MIT — see [LICENSE](LICENSE).

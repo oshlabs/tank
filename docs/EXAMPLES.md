@@ -1,7 +1,7 @@
 # Tank by example
 
 Tank is a declarative container orchestrator for the BEAM, built entirely on
-[Linx](../../README.md). You describe the pods that should run — their image,
+[Linx](https://hexdocs.pm/linx). You describe the pods that should run — their image,
 network, resources, and restart policy — as plain Elixir data; Tank persists
 that desired state in a Khepri store, and a reconcile loop converges the machine
 toward it, keeping it there across drift, crashes, and reboots.

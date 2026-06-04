@@ -112,7 +112,8 @@ defmodule Tank.Image do
 
   # Honest logging: the manifest is resolved over the network every time (to
   # follow a moving tag), but the heavy layer data is downloaded only on a miss.
-  defp cached_rootfs?(cache, digest, refresh), do: not refresh and File.dir?(rootfs_path(cache, digest))
+  defp cached_rootfs?(cache, digest, refresh),
+    do: not refresh and File.dir?(rootfs_path(cache, digest))
 
   defp log_resolution(parsed, digest, true),
     do: Logger.info("tank: using cached #{ref_string(parsed)} (#{short_digest(digest)})")

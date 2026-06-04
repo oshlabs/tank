@@ -31,8 +31,8 @@ defmodule Tank do
   ## Bootstrap vs. runtime
 
   Khepri is the source of truth. `config/runtime.exs` only *seeds* pods
-  create-if-absent on a fresh store (see `Tank.Application`), so the boot seed
-  never clobbers state changed at runtime via `apply/1` / `delete/1`.
+  create-if-absent on a fresh store, so the boot seed never clobbers state
+  changed at runtime via `apply/1` / `delete/1`.
   """
 
   require Logger

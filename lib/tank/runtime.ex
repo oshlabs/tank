@@ -7,10 +7,9 @@ defmodule Tank.Runtime do
 
     1. pull the image and derive run params (`Tank.OCI`),
     2. spawn the workload into namespaces, parked at the checkpoint,
-    3. build the rootfs (`Tank.Runtime.Rootfs`) with per-pod `/etc` files
-       (`Tank.Runtime.Etc`),
+    3. build the rootfs (`Tank.Runtime.Rootfs`) with per-pod `/etc` files,
     4. configure the network (`Tank.Runtime.Network`),
-    5. apply cgroup limits (`Tank.Runtime.Limits`),
+    5. apply cgroup limits,
     6. `proceed` — the workload `execve`s inside its container.
 
   ## Scope (M4)
@@ -323,7 +322,8 @@ defmodule Tank.Runtime do
     :ok = Workload.set_owner(session, self())
 
     case Workload.info(session) do
-      {:ok, %{stage: stage, result: result}} when stage in [:exited, :signaled, :errored, :aborted] ->
+      {:ok, %{stage: stage, result: result}}
+      when stage in [:exited, :signaled, :errored, :aborted] ->
         reclaim_terminal(result, state)
 
       _ ->

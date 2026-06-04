@@ -1,0 +1,63 @@
+name: CI
+
+# Runs on PRs targeting main (so you see green/red before merging) and on
+# pushes to main (which is what the README badge tracks).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (elixir ${{ matrix.elixir }} / otp ${{ matrix.otp }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Tank's store uses Khepri, whose Horus dependency cannot extract
+          # stored functions under OTP 29 yet, so the supported toolchain is
+          # OTP 28. Mirrors the pinned dev toolchain (.tool-versions).
+          - elixir: "1.19"
+            otp: "28"
+            lint: true
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp${{ matrix.otp }}-elixir${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp${{ matrix.otp }}-elixir${{ matrix.elixir }}-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Check formatting
+        if: matrix.lint
+        run: mix format --check-formatted
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      # The :integration / :network tests need root and real namespaces, so
+      # they're excluded by default in test_helper.exs; this runs the
+      # non-privileged suite.
+      - name: Run tests
+        run: mix test --warnings-as-errors

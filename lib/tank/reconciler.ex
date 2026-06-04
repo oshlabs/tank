@@ -5,8 +5,8 @@ defmodule Tank.Reconciler do
   `Tank.apply/1` a pod and the reconciler starts it — you never start a
   container imperatively.
 
-  Each pass reads `Tank.Store.list_pods/0`, diffs it against what's tracked
-  (`Tank.Reconciler.Plan`), and actuates:
+  Each pass reads `Tank.Store.list_pods/0`, diffs it against what's tracked,
+  and actuates:
 
     * desired ∧ ¬tracked            → start a `Tank.Runtime` under the loop's
       `DynamicSupervisor`,

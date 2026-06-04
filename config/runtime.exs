@@ -13,7 +13,8 @@ config :tank, data_dir: data_dir
 # A plain path, independent of the data dir, that survives restarts. Override
 # with TANK_IMAGE_CACHE or this key; defaults to the XDG user cache (~/.cache/tank).
 config :tank,
-  image_cache: System.get_env("TANK_IMAGE_CACHE") || to_string(:filename.basedir(:user_cache, ~c"tank"))
+  image_cache:
+    System.get_env("TANK_IMAGE_CACHE") || to_string(:filename.basedir(:user_cache, ~c"tank"))
 
 # The default store lives under data_dir. A consumer running its own Khepri
 # (BYO) instead sets `config :tank, :store, store_id: :their_store` with no
