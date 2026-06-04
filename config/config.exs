@@ -8,7 +8,7 @@ import Config
 config :tank, start_store?: true
 
 # The host-config adapter (uplink + DNS facts). The default reads them from
-# config; a consumer (e.g. TankOS) swaps in its own. See `Tank.Host`.
+# config; a consumer swaps in its own. See `Tank.Host`.
 config :tank, host: Tank.Host.Static
 
 # Reconciler restart backoff: the first restart waits `backoff_base`, doubling

@@ -1,6 +1,6 @@
 This is `tank`, an opinionated single-node (growing to multi-node) declarative
 container orchestrator for the BEAM, built on Linx and designed to be embedded
-in **TankOS**, a Nerves device OS. The code is pure Elixir. See `docs/PLAN.md`
+in an embedded device OS. The code is pure Elixir. See `docs/PLAN.md`
 for the architecture and route.
 
 ## What Tank is, in one breath
@@ -115,9 +115,9 @@ primitives. Opinionated: macvlan networking, no pluggable CNI, no YAML.
 ## Khepri discipline
 
 - Tank owns the **`[:tank, …]`** subtree and nothing else. Do not read or write
-  another system's subtree (`[:tankos, …]`).
+  another system's subtree (e.g. `[:other_app, …]`).
 - Tank **uses** a store; it does not own the store's lifecycle or cluster
-  membership (TankOS's job). Take the store name as configuration; start a
+  membership (the consumer's job). Take the store name as configuration; start a
   default store only for standalone/test use (`Tank.Store`).
 - Reads on the hot path go through the **ETS projection**, not direct Raft
   queries. Writes are idempotent; use transactions for atomic multi-key updates.

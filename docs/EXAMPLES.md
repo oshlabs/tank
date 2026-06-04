@@ -10,7 +10,7 @@ It is the Kubernetes shape collapsed to a single node: **you never imperatively
 start a container.** You state intent with `Tank.apply/1`, and the loop makes
 reality match — start, restart-with-backoff, stop — until you change the intent.
 Tank is deliberately opinionated (macvlan networking, one consistent state tree)
-so an embedded device — its home is TankOS, a Nerves device OS — gets a runtime
+so an embedded device — its home is an embedded device OS — gets a runtime
 rather than a kit of parts. It also runs standalone on a plain Linux laptop,
 which is where these examples run.
 
@@ -298,9 +298,8 @@ default adapter reads them from config:
 
 With this set, a NIC can omit `parent:` (it defaults to `:auto`) and a pod can
 omit `dns:` — both fall back to these host facts. A consumer that manages host
-networking itself (e.g. a Nerves device reading VintageNet) points
-`config :tank, host: MyHostAdapter` at its own `Tank.Host` implementation; Tank
-core never depends on it.
+networking itself points `config :tank, host: MyHostAdapter` at its own
+`Tank.Host` implementation; Tank core never depends on it.
 
 ## Interactive containers
 

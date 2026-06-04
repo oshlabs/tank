@@ -2,7 +2,7 @@
 
 Tank is an opinionated, single-node (growing to multi-node) **declarative
 container orchestrator** for the BEAM, built entirely on Linx's public API and
-designed to be embedded in **TankOS**, a Nerves device OS. You describe the
+designed to be embedded in a device OS. You describe the
 containers that must run — with their network, resources, and restart policy —
 as Elixir data; Tank reconciles the device toward that desired state and keeps
 it there across drift, crashes, and reboots.
@@ -63,7 +63,7 @@ A small set of composable modules, each with one job.
 | `Tank.Store` | The Khepri seam: own the `[:tank, …]` subtree, project it to ETS, BYO-store-or-default. |
 | `Tank.Runtime` (a.k.a. `Tank.Pod.Runner`) | The actuator: turn one pod spec into running reality on Linx. |
 | `Tank.Reconciler` | The control loop: converge observed reality toward the desired set; restart with backoff. |
-| `Tank.Host` | The host-config seam (a behaviour): uplink, DNS, host IP facts. `Tank.Host.Static` default; VintageNet/Linx adapters plug in. |
+| `Tank.Host` | The host-config seam (a behaviour): uplink, DNS, host IP facts. `Tank.Host.Static` default; consumer/Linx adapters plug in. |
 | `Tank` | Top-level API (`pod/2`, `apply/1`, `delete/1`) + the supervision tree. |
 
 The seam between **mechanism** (Linx) and **policy** (Tank) is strict; the seam
@@ -122,7 +122,7 @@ Entrypoint`, then `++ (args || Cmd)`; `env` is the image `Env` with the pod's
 
 **Restart + backoff** is owned by the reconciler, K8s-style and configurable:
 `delay = min(10s · 2ⁿ, 300s)`, reset after a stable-run window (~10 min). We do
-not lean on systemd — Nerves has none.
+not lean on systemd — embedded targets have none.
 
 ## State: Khepri from day one
 
@@ -133,12 +133,12 @@ shape; that is the whole reason to adopt it early rather than a flat file.
 **Who owns the store.** Tank is a *library*, so it never owns the store's
 lifecycle or cluster membership — those are application/host concerns:
 
-- **TankOS owns the store.** It starts Khepri, points Ra's data directory at the
+- **The consumer owns the store.** It starts Khepri, points Ra's data directory at the
   writable data partition (flash-wear aware), manages cluster join/leave, and
-  hosts its own `[:tankos, …]` subtrees (e.g. host network config).
+  hosts its own subtrees (e.g. host network config).
 - **Tank owns `[:tank, …]`.** It reads/writes/watches its subtree and takes the
-  *store name* as configuration. For standalone use (tests, dev, Tank without
-  TankOS) `Tank.Store` starts a default store if none is supplied — the
+  *store name* as configuration. For standalone use (tests, dev, a bare Tank)
+  `Tank.Store` starts a default store if none is supplied — the
   "bring-your-own-or-I'll-boot-a-default" pattern.
 
 ```
@@ -175,7 +175,7 @@ keeps its stuff" — plain Application env / `runtime.exs`:
     config :tank, data_dir: "/var/lib/tank"   # images/, volumes/, run/ live here
 
 On a laptop this defaults to a user cache dir (e.g. `~/.cache/tank`). The
-Khepri/Ra data dir specifically is owned by the *consumer* (TankOS sets it
+Khepri/Ra data dir specifically is owned by the *consumer* (which sets it
 on-device, flash-wear aware); standalone Tank's default store gets a dir under
 `data_dir`.
 
@@ -302,10 +302,10 @@ Linx-side addition.
 ## Host-config sharing
 
 Tank must *share certain aspects* of host networking without owning them — and
-without dragging in any Nerves dependency, because Tank must also run standalone
-on a plain Linux laptop. So `Tank.Host` is a **behaviour** (an adapter
-contract), and **Tank core has zero compile-time dependency on VintageNet or
-anything Nerves**. The contract exposes:
+without dragging in any host-networking dependency, because Tank must also run
+standalone on a plain Linux laptop. So `Tank.Host` is a **behaviour** (an adapter
+contract), and **Tank core has zero compile-time dependency on the consumer's
+networking stack**. The contract exposes:
 
 - the **uplink interface** name (the macvlan parent; resolves `parent: :auto`),
 - the host **DNS servers** (for the container's `/etc/resolv.conf`),
@@ -315,11 +315,10 @@ Adapters:
 
 - **`Tank.Host.Static`** — shipped in Tank, the v1 default: uplink + DNS read
   straight from config. Runs anywhere, laptop included.
-- **`Tank.Host.VintageNet`** — lives in **TankOS** (or a tiny optional sibling
-  package), never in Tank's deps. Reads VintageNet's PropertyTable
-  (`["interface", ifname, "addresses"]`, `["name_servers"]`,
-  `["interface", ifname, "connection"]`) and subscribes to its
-  `{VintageNet, property, old, new, meta}` events.
+- **A consumer-provided adapter** — lives in the consumer (or a tiny optional
+  sibling package), never in Tank's deps. Reads the host's own network manager
+  (addresses, name servers, per-interface connection state) and subscribes to
+  its change events.
 - **`Tank.Host.Linx`** *(later)* — auto-detect uplink + DNS from rtnetlink and
   `/etc/resolv.conf`; a zero-config Linux/laptop default.
 
@@ -327,21 +326,21 @@ All behind the same behaviour, so nothing on the Tank side changes when the
 consumer swaps adapters. Tank never configures the host's uplink; it only reads
 it and builds container networking off it.
 
-## TankOS (the consumer, out of tree)
+## The consumer (out of tree)
 
-TankOS is a separate Nerves application that depends on Tank. Its
+The consumer is a separate application that depends on Tank. Its
 responsibilities, kept out of the Tank library:
 
 - start and own the **Khepri store** (Ra data dir on the writable partition,
   cluster membership),
-- configure **host networking** (VintageNet today),
+- configure **host networking**,
 - seed `[:tank, :pods, …]` from device config and expose a management surface,
 - run Tank in its supervision tree.
 
 Tank stays liftable into its own repository: `git mv tank ../tank` plus flipping
 `{:linx, path: ".."}` to `{:linx, "~> x.y"}`.
 
-**Standalone, off Nerves.** Tank is a first-class standalone app — the primary
+**Standalone, off-device.** Tank is a first-class standalone app — the primary
 dev loop is a plain Linux laptop, not a device. There it starts its own default
 Khepri store, uses `Tank.Host.Static`, and runs as root for namespaces / mounts
 / netlink via the repo's `./sudorun.sh` (root `iex -S mix`) and `./sudotest.sh`
@@ -488,13 +487,13 @@ extending it the same way and re-polish as needed.
   slice and was polished into the full showcase. Verified end-to-end on real
   containers.)*
 - **M6 — `Tank.Host` seam.** The `Tank.Host` behaviour + `Tank.Host.Static`
-  default (uplink + DNS from config); `parent: :auto`. VintageNet/Linx adapters
+  default (uplink + DNS from config); `parent: :auto`. Consumer/Linx adapters
   are consumer-side / later. *(done — `Tank.Host` is the behaviour *and* the
   facade that dispatches to the configured adapter (`config :tank, host:`),
   default `Tank.Host.Static` (uplink + DNS from `config :tank, Tank.Host.Static`).
   `parent: :auto` resolves the uplink in `Runtime.Network`; an empty pod `dns:`
   inherits the host's in `Runtime.Etc`. The contract is just the two facts Tank
-  consumes today — host IP facts + change-notifications land with the VintageNet
+  consumes today — host IP facts + change-notifications land with the consumer
   adapter that needs them. Verified on real netns/macvlan.)*
 - **M7 — Multi-container pods.** Sidecars sharing the pod's netns and lifetime.
   *(needs design refinement before starting — see "Multi-container pods (M7)"
@@ -524,7 +523,7 @@ repository.
   ns rec-private before any in-container mount, or mounts propagate back to the
   host.
 - **Ra on flash** — the Raft WAL + snapshots wear flash; mitigated by Tank's low
-  config write-volume and a deliberately chosen data dir (TankOS's job).
+  config write-volume and a deliberately chosen data dir (the consumer's job).
 - **macvlan on Wi-Fi** — APs commonly refuse it; bridge/`:host` is the fallback.
 - **`Tank.Container` rename** — *done (M3).* The PoC `Tank.Container` GenServer
   is now `Tank.Runtime`; `Tank.Container` is the desired-state struct. M4 grows

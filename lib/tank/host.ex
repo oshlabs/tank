@@ -4,8 +4,8 @@ defmodule Tank.Host do
   them — the uplink a macvlan attaches to, and the DNS servers a container
   inherits.
 
-  Tank must share these without dragging in any Nerves dependency (it also runs
-  on a plain Linux laptop), so `Tank.Host` is a **behaviour**: an adapter
+  Tank must share these without dragging in any host-networking dependency (it
+  also runs on a plain Linux laptop), so `Tank.Host` is a **behaviour**: an adapter
   contract. The adapter is chosen by config and reached through this module's
   facade — callers say `Tank.Host.uplink()` and never name the adapter:
 
@@ -15,15 +15,15 @@ defmodule Tank.Host do
 
     * `Tank.Host.Static` — shipped here, the v1 default: uplink + DNS straight
       from config. Runs anywhere.
-    * `Tank.Host.VintageNet` — lives in the consumer (TankOS), never in Tank's
-      deps: reads VintageNet's PropertyTable. *(later)*
+    * A **consumer-provided adapter** — lives in the consumer, never in Tank's
+      deps: reads the host's own network manager. *(later)*
     * `Tank.Host.Linx` — auto-detect uplink + DNS from rtnetlink and
       `/etc/resolv.conf`; a zero-config laptop default. *(later)*
 
   The contract is intentionally just what Tank core consumes today: the uplink
   (resolving a NIC's `parent: :auto`) and the DNS list (the pod's
   `/etc/resolv.conf` when it declares no `dns:`). It will grow host IP facts and
-  change-notifications when an adapter that has them (VintageNet) needs them.
+  change-notifications when an adapter that has them needs them.
   """
 
   @doc "The uplink interface name a macvlan should attach to (`parent: :auto`)."

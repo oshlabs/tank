@@ -11,7 +11,7 @@ defmodule Tank.Store do
     * `:data_dir` set — Tank **boots a default store** at that directory and owns
       it (standalone, dev, tests).
     * `:data_dir` `nil` — the store named by `:store_id` is assumed to be started
-      by the consumer (e.g. TankOS); Tank only attaches its projection.
+      by the consumer; Tank only attaches its projection.
 
   Either way Tank registers a `khepri_projection` mirroring `[:tank, :pods, **]`
   into the ETS table `#{inspect(:tank_pods)}`, so `list_pods/0` is a fast local

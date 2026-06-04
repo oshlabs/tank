@@ -18,9 +18,6 @@ the whole thing — is composed entirely from Linx's **public** primitives
 (`Linx.Process`, `Linx.Netlink.Rtnl`) plus OTP supervision and a Khepri store.
 By design that composite can't live in a primitives library, so it lives here.
 
-Tank's home is **TankOS**, a [Nerves](https://nerves-project.org) device OS, but
-it runs standalone on a plain Linux host too.
-
 > ⚠️ **Early-stage (0.x).** Tank is a working proof of concept maturing into a
 > real orchestrator; the API may change between minor releases until 1.0.
 

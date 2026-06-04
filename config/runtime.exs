@@ -1,6 +1,6 @@
 import Config
 
-# Operational config: where Tank keeps its data. A consumer (e.g. TankOS) sets
+# Operational config: where Tank keeps its data. A consumer sets
 # TANK_DATA_DIR or overrides `:tank, :data_dir` directly; standalone Tank
 # defaults to a per-user cache directory.
 data_dir =
