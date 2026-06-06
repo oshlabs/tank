@@ -51,8 +51,9 @@ defmodule Tank.MixProject do
     [
       {:linx, "~> 0.1"},
       # OCI toolkit — all registry fetching goes through Stevedore (Tank.Image.Registry
-      # is a thin shim over it). Its docker:// client uses :req, declared below.
-      {:stevedore, "~> 0.1"},
+      # is a thin shim over it). 0.2 adds the token cache the shim threads per pull. Its
+      # docker:// client uses :req, declared below.
+      {:stevedore, "~> 0.2"},
       # HTTP client: Tank.Image.Registry's shim and Stevedore's docker:// client both use it.
       {:req, "~> 0.5"},
       # Tree-structured, Raft-replicated desired-state store (Tank.Store).

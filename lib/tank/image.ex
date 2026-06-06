@@ -99,14 +99,23 @@ defmodule Tank.Image do
   end
 
   defp pull_online(parsed, cache, refresh) do
-    with {:ok, top, token} <-
-           Registry.manifest(parsed.registry, parsed.repo, parsed.reference),
-         {:ok, image} <- resolve_platform(parsed, top, token),
-         _ = log_resolution(parsed, image.digest, cached_rootfs?(cache, image.digest, refresh)),
-         {:ok, config} <- fetch_config(parsed, image, token, cache, refresh),
-         {:ok, rootfs} <- assemble_rootfs(parsed, image, token, cache, refresh) do
-      write_ref(cache, parsed, image.digest, config)
-      {:ok, %{rootfs: rootfs, config: config}}
+    # One bearer token serves a whole pull (manifest + every blob share the repo's pull scope),
+    # so a short-lived cache for the pull's duration avoids re-running the token handshake per
+    # fetch. Threaded through as the registry client's auth handle; stopped when the pull ends.
+    {:ok, token_cache} = Stevedore.Auth.Cache.start_link([])
+
+    try do
+      with {:ok, top, _echo} <-
+             Registry.manifest(parsed.registry, parsed.repo, parsed.reference, token_cache),
+           {:ok, image} <- resolve_platform(parsed, top, token_cache),
+           _ = log_resolution(parsed, image.digest, cached_rootfs?(cache, image.digest, refresh)),
+           {:ok, config} <- fetch_config(parsed, image, token_cache, cache, refresh),
+           {:ok, rootfs} <- assemble_rootfs(parsed, image, token_cache, cache, refresh) do
+        write_ref(cache, parsed, image.digest, config)
+        {:ok, %{rootfs: rootfs, config: config}}
+      end
+    after
+      Agent.stop(token_cache)
     end
   end
 
@@ -130,15 +139,15 @@ defmodule Tank.Image do
   # the host architecture and fetch that manifest. A single image manifest is
   # used as-is. Either way the manifest carries a `:digest` — the registry
   # client always resolves one (from the header, or computed from the bytes).
-  defp resolve_platform(parsed, %{media_type: media_type} = manifest, token) do
+  defp resolve_platform(parsed, %{media_type: media_type} = manifest, token_cache) do
     if index?(media_type) do
       case pick_platform(manifest.json["manifests"]) do
         nil ->
           {:error, {:no_platform, host_platform()}}
 
         %{"digest" => digest} ->
-          case Registry.manifest(parsed.registry, parsed.repo, digest, token) do
-            {:ok, image, _token} -> {:ok, image}
+          case Registry.manifest(parsed.registry, parsed.repo, digest, token_cache) do
+            {:ok, image, _token_cache} -> {:ok, image}
             error -> error
           end
       end
@@ -165,10 +174,10 @@ defmodule Tank.Image do
 
   # Download + parse the image config blob. The config (entrypoint, env, ...)
   # is not applied yet -- it is returned so a later run API can use it.
-  defp fetch_config(parsed, image, token, cache, refresh) do
+  defp fetch_config(parsed, image, token_cache, cache, refresh) do
     digest = image.json["config"]["digest"]
 
-    with {:ok, path} <- fetch_blob(parsed, digest, token, cache, refresh) do
+    with {:ok, path} <- fetch_blob(parsed, digest, token_cache, cache, refresh) do
       {:ok, JSON.decode!(File.read!(path))}
     end
   end
@@ -176,7 +185,7 @@ defmodule Tank.Image do
   # Extract every layer, in order, into a rootfs directory keyed by the image
   # manifest digest -- so an already-assembled image is reused. Extraction goes
   # into a `.tmp` sibling that is renamed into place only on full success.
-  defp assemble_rootfs(parsed, image, token, cache, refresh) do
+  defp assemble_rootfs(parsed, image, token_cache, cache, refresh) do
     rootfs = rootfs_path(cache, image.digest)
 
     if File.dir?(rootfs) and not refresh do
@@ -189,7 +198,7 @@ defmodule Tank.Image do
 
       result =
         Enum.reduce_while(image.json["layers"], :ok, fn layer, :ok ->
-          case extract_layer(parsed, layer["digest"], token, cache, tmp, refresh) do
+          case extract_layer(parsed, layer["digest"], token_cache, cache, tmp, refresh) do
             :ok -> {:cont, :ok}
             error -> {:halt, error}
           end
@@ -208,8 +217,8 @@ defmodule Tank.Image do
   end
 
   # Fetch one layer blob and extract its gzipped tar into `dir`.
-  defp extract_layer(parsed, digest, token, cache, dir, refresh) do
-    with {:ok, path} <- fetch_blob(parsed, digest, token, cache, refresh) do
+  defp extract_layer(parsed, digest, token_cache, cache, dir, refresh) do
+    with {:ok, path} <- fetch_blob(parsed, digest, token_cache, cache, refresh) do
       case Tank.Image.Tar.extract(path, dir) do
         :ok -> :ok
         {:error, reason} -> {:error, {:extract, digest, reason}}
@@ -219,7 +228,7 @@ defmodule Tank.Image do
 
   # Return a cached blob's path, downloading + verifying on a cache miss (or
   # always, when `refresh`). Blobs are content-addressed at cache/blobs/<algo>/<hex>.
-  defp fetch_blob(parsed, digest, token, cache, refresh) do
+  defp fetch_blob(parsed, digest, token_cache, cache, refresh) do
     path = blob_path(cache, digest)
 
     if not refresh and File.exists?(path) and verify(File.read!(path), digest) == :ok do
@@ -228,7 +237,7 @@ defmodule Tank.Image do
       # Stevedore already verified the downloaded bytes against `digest`; the
       # local verify above is the on-disk cache-integrity check (Stevedore isn't
       # in that path).
-      with {:ok, body} <- Registry.blob(parsed.registry, parsed.repo, digest, token) do
+      with {:ok, body} <- Registry.blob(parsed.registry, parsed.repo, digest, token_cache) do
         File.mkdir_p!(Path.dirname(path))
         File.write!(path, body)
         {:ok, path}

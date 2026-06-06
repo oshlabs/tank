@@ -5,12 +5,14 @@ defmodule Tank.Image.Registry do
   Tank fetches all OCI data through Stevedore. This module preserves the
   historical return contracts so the rest of `Tank.Image` is unchanged:
 
-    * `manifest/4` → `{:ok, info, token}` (an image index / manifest list, or a
-      single image manifest);
+    * `manifest/4` → `{:ok, info, token_cache}` (an image index / manifest list,
+      or a single image manifest);
     * `blob/4` → `{:ok, bytes}` (a layer or the image config).
 
   The bearer-token handshake, manifest fetch, and digest-verified blob download
-  all live in Stevedore now; the `token` argument is inert (see `t:token/0`).
+  all live in Stevedore now. The 4th argument is an optional
+  `Stevedore.Auth.Cache` (`t:token_cache/0`) that `Tank.Image` threads across a
+  pull so the bearer token is earned once rather than re-fetched per call.
   """
 
   alias Stevedore.{Digest, Reference}
@@ -30,24 +32,26 @@ defmodule Tank.Image.Registry do
         }
 
   @typedoc """
-  Formerly the anonymous bearer token threaded across calls. Stevedore manages
-  auth internally now, so this is inert — kept for signature compatibility and
-  echoed back unchanged.
+  An optional `Stevedore.Auth.Cache` threaded across a pull's fetches so the bearer token is
+  reused instead of re-earned on every call. `nil` disables caching. `manifest/4` echoes it back
+  so the caller can thread it onward — it occupies the slot the old client used for the bearer
+  token.
   """
-  @type token :: String.t() | nil
+  @type token_cache :: Agent.agent() | nil
 
   @doc """
   Fetches the manifest for `repo`:`reference` from `registry`.
 
-  `reference` is a tag or a `sha256:` digest. Returns `{:ok, info, token}`,
-  where `token` is echoed back unchanged (Stevedore performs auth internally).
+  `reference` is a tag or a `sha256:` digest; `token_cache` is an optional
+  `Stevedore.Auth.Cache`. Returns `{:ok, info, token_cache}`, echoing the cache back so the
+  caller threads it into the pull's later fetches.
   """
-  @spec manifest(String.t(), String.t(), String.t(), token()) ::
-          {:ok, info(), token()} | {:error, term}
-  def manifest(registry, repo, reference, token \\ nil) do
-    case OCI.manifest(ref(registry, repo, reference)) do
+  @spec manifest(String.t(), String.t(), String.t(), token_cache()) ::
+          {:ok, info(), token_cache()} | {:error, term}
+  def manifest(registry, repo, reference, token_cache \\ nil) do
+    case OCI.manifest(ref(registry, repo, reference), cache_opts(token_cache)) do
       {:ok, %{media_type: mt, digest: digest, raw: raw, json: json}} ->
-        {:ok, %{media_type: mt, digest: to_string(digest), raw: raw, json: json}, token}
+        {:ok, %{media_type: mt, digest: to_string(digest), raw: raw, json: json}, token_cache}
 
       {:error, error} ->
         {:error, translate(error, :manifest)}
@@ -61,10 +65,10 @@ defmodule Tank.Image.Registry do
   drops the `Authorization` header across CDN redirects, so the blob arrives
   already-verified and the token is never handed to the CDN.
   """
-  @spec blob(String.t(), String.t(), String.t(), token()) :: {:ok, binary} | {:error, term}
-  def blob(registry, repo, digest, _token) do
+  @spec blob(String.t(), String.t(), String.t(), token_cache()) :: {:ok, binary} | {:error, term}
+  def blob(registry, repo, digest, token_cache \\ nil) do
     with {:ok, d} <- Digest.parse(digest),
-         {:ok, bytes} <- OCI.blob(ref(registry, repo, nil), d) do
+         {:ok, bytes} <- OCI.blob(ref(registry, repo, nil), d, cache_opts(token_cache)) do
       {:ok, bytes}
     else
       {:error, %Error{} = error} -> {:error, translate(error, :blob)}
@@ -73,6 +77,10 @@ defmodule Tank.Image.Registry do
   end
 
   # --- helpers --------------------------------------------------------------
+
+  # Pass the pull's token cache to Stevedore when present; omit it otherwise.
+  defp cache_opts(nil), do: []
+  defp cache_opts(cache), do: [token_cache: cache]
 
   # Build a Stevedore.Reference from Tank's already-normalized parts. The Docker
   # Hub default and `library/` prefix are applied upstream in
