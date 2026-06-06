@@ -1,7 +1,7 @@
 defmodule Tank.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/oshlabs/tank"
 
   # Tank is a *consumer* of Linx, not part of the Linx package. It depends on
@@ -37,7 +37,10 @@ defmodule Tank.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => @source_url},
+      links: %{
+        "GitHub" => @source_url,
+        "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md"
+      },
       # Ship only the library sources. The dev-time config/, the docs/ extras
       # (rendered to hexdocs separately), and the sudo helper scripts are not
       # part of the package; Tank reads its own config with in-code defaults,
@@ -70,6 +73,7 @@ defmodule Tank.MixProject do
       source_ref: "v#{@version}",
       extras: [
         "README.md",
+        "CHANGELOG.md",
         "docs/EXAMPLES.md": [title: "Tank by example"],
         LICENSE: [title: "License"]
       ]
