@@ -128,7 +128,8 @@ defmodule Tank.Image do
 
   # A multi-arch index lists one manifest per platform: pick the entry matching
   # the host architecture and fetch that manifest. A single image manifest is
-  # used as-is. Either way the result carries a `:digest` (see with_digest/1).
+  # used as-is. Either way the manifest carries a `:digest` — the registry
+  # client always resolves one (from the header, or computed from the bytes).
   defp resolve_platform(parsed, %{media_type: media_type} = manifest, token) do
     if index?(media_type) do
       case pick_platform(manifest.json["manifests"]) do
@@ -137,12 +138,12 @@ defmodule Tank.Image do
 
         %{"digest" => digest} ->
           case Registry.manifest(parsed.registry, parsed.repo, digest, token) do
-            {:ok, image, _token} -> {:ok, with_digest(image)}
+            {:ok, image, _token} -> {:ok, image}
             error -> error
           end
       end
     else
-      {:ok, with_digest(manifest)}
+      {:ok, manifest}
     end
   end
 
@@ -159,13 +160,6 @@ defmodule Tank.Image do
   end
 
   defp pick_platform(_manifests), do: nil
-
-  # Ensure the manifest has a digest -- registries normally return one in the
-  # `Docker-Content-Digest` header; otherwise compute it from the raw bytes.
-  defp with_digest(%{digest: nil, raw: raw} = manifest),
-    do: %{manifest | digest: "sha256:" <> hex_sha256(raw)}
-
-  defp with_digest(manifest), do: manifest
 
   # --- blobs ----------------------------------------------------------------
 
@@ -231,8 +225,10 @@ defmodule Tank.Image do
     if not refresh and File.exists?(path) and verify(File.read!(path), digest) == :ok do
       {:ok, path}
     else
-      with {:ok, body} <- Registry.blob(parsed.registry, parsed.repo, digest, token),
-           :ok <- verify(body, digest) do
+      # Stevedore already verified the downloaded bytes against `digest`; the
+      # local verify above is the on-disk cache-integrity check (Stevedore isn't
+      # in that path).
+      with {:ok, body} <- Registry.blob(parsed.registry, parsed.repo, digest, token) do
         File.mkdir_p!(Path.dirname(path))
         File.write!(path, body)
         {:ok, path}

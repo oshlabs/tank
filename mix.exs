@@ -12,7 +12,7 @@ defmodule Tank.MixProject do
     [
       app: :tank,
       version: @version,
-      elixir: "~> 1.15",
+      elixir: "~> 1.18",
       start_permanent: false,
       deps: deps(),
       name: "Tank",
@@ -50,7 +50,10 @@ defmodule Tank.MixProject do
   defp deps do
     [
       {:linx, "~> 0.1"},
-      # HTTP client for the OCI registry client (Tank.Image.Registry).
+      # OCI toolkit — all registry fetching goes through Stevedore (Tank.Image.Registry
+      # is a thin shim over it). Its docker:// client uses :req, declared below.
+      {:stevedore, "~> 0.1"},
+      # HTTP client: Tank.Image.Registry's shim and Stevedore's docker:// client both use it.
       {:req, "~> 0.5"},
       # Tree-structured, Raft-replicated desired-state store (Tank.Store).
       {:khepri, "~> 0.18.0"},
