@@ -28,7 +28,9 @@ defmodule Tank.Image do
 
   An online pull always resolves the manifest (to follow a moving tag), but the
   heavy layer data downloads only on a cache miss — the log says `pulling` then,
-  and `using cached <ref> (<digest>)` on a hit.
+  and `using cached <ref> (<digest>)` on a hit. So re-pulling an unchanged image
+  fetches only the (small) manifest, never the layers or assembled rootfs;
+  `offline: true` skips even the manifest and serves entirely from cache.
 
   Layers extract as the user running the BEAM, so a pulled image satisfies a
   root-remapped (userns) rootfs-ownership rule with no `chown`.
