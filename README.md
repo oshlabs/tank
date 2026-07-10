@@ -59,6 +59,19 @@ Tank.exec("web", ["/bin/sh"])   # a shell beside the running container
 Tank.delete("web") #=> :ok   (the reconciler tears it down)
 ```
 
+
+## The web face
+
+Tank ships its own admin UI (`lib/tank_web`, Phoenix LiveView rendering
+[Gooey](https://github.com/oshlabs/gooey)): pod list and detail with live
+status, streaming stats, a log viewer, and an in-browser terminal
+(exec/attach). It is **opt-in** — without `config :tank, :web, enabled: true`
+(or `TANK_WEB=1`) Tank runs headless and no web process starts.
+
+Development: `mix phx.server` serves the UI without privileges (pods can't
+actuate); `./sudoweb.sh` runs it as root against real containers on
+`http://localhost:4400`. Run `mix setup` once for the asset toolchain.
+
 A pod is one network namespace holding one or more containers; `apply/1` is
 create-or-replace and validates the map into a `%Tank.Pod{}` up front. The full
 surface — images and the OCI command/env merge, volumes and mounts, cgroup

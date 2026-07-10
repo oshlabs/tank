@@ -8,6 +8,36 @@ All notable changes to Tank are documented here. The format is based on
 
 ### Added
 
+- **The web face: `lib/tank_web`** — a Phoenix LiveView admin UI inside the
+  tank app (one OTP application; the stock `app`/`app_web` layout). Opt-in:
+  `config :tank, :web, enabled: true` or `TANK_WEB=1`; absent, Tank boots
+  headless exactly as before. Screens: pod list (live status, apply/delete),
+  pod detail — status header with IPAM addresses, streaming CPU/mem/RX/TX
+  stat tiles and charts, live log viewer, in-browser terminal (exec a shell
+  or attach, over `Tank.Console`), spec view — plus read-only networks and
+  system pages. Renders Gooey (the shared design system; tank theme).
+  Dev: `mix phx.server` (UI-only) or `./sudoweb.sh` (real containers; builds
+  into `_build-sudo` so root and user builds never collide).
+- **Domain plumbing under the UI** (all headless-safe): `Tank.Events`
+  (`:pods` + `{:stats, pod}` topics); observed pod status kept and merged —
+  `Tank.status/0,1` (incl. `last_exit`), `Tank.restart/1`; `Tank.Stats`
+  (2s sampler: cgroup cpu/mem/pids + per-netns interface counters; ETS ring
+  history raw 10min + coarse 4h; `Tank.stats/1,2`) — every pod now gets an
+  accounting cgroup, limits or not; `Tank.Console` (exec/attach as
+  byte-stream sessions for non-terminal consumers, with attach guard and
+  log tee); `Tank.Store.Web` (`[:tank_web]` subtree seam).
+- Pods get their own hostname: bring-up sets the UTS `kernel.hostname` to
+  the pod name and `/etc/hostname` is materialized (images no longer leak
+  their build hostname — debian's "debuerreotype").
+
+### Changed
+
+- **Runtime owner messages are name-attributed**: `{:tank, pod_name, event}`
+  (was `{:tank, event_atom, arg}`) so one owner can watch every runtime.
+  The reconciler is now every runtime's owner and forwards copies to a
+  configured `:owner`.
+- Elixir floor raised to `~> 1.19` (gooey requires it).
+
 - **Container log capture.** A non-tty container's stdout/stderr no longer
   vanish into `/dev/null`: a per-pod collector (`Tank.Runtime.Logs`) receives
   them over AF_UNIX `{:connect_unix, _}` stdio — linx connects the sockets
