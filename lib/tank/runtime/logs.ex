@@ -19,9 +19,9 @@ defmodule Tank.Runtime.Logs do
   briefly and flushes any partial line, so a workload's last words survive
   a normal exit.
 
-  One practical constraint: AF_UNIX paths cap at ~107 bytes, so a very deep
-  `data_dir` can push the scratch socket paths over the limit — linx then
-  fails the spawn fast with `{:error, ENAMETOOLONG, :connect_unix}`.
+  AF_UNIX paths cap at ~107 bytes; with a very deep `data_dir` the listener
+  sockets fall back to a short private dir under the system tmp (removed on
+  stop) instead of failing the pod's bring-up.
   """
 
   use GenServer
@@ -96,12 +96,24 @@ defmodule Tank.Runtime.Logs do
         _ -> 0
       end
 
+    # AF_UNIX paths cap at ~107 bytes: a deep data_dir would make listen(2)
+    # fail with :einval and crash-loop the pod. Fall back to a short private
+    # dir under the system tmp (cleaned up in terminate/2).
+    sock_dir =
+      if byte_size(Path.join(scratch, "log-out.sock")) < 100 do
+        scratch
+      else
+        dir = Path.join(System.tmp_dir!(), "tank-ls-#{System.unique_integer([:positive])}")
+        File.mkdir_p!(dir)
+        dir
+      end
+
     # One listener per captured stream. The workload connects exactly once
     # per fd (at spawn, agent-side); after the handoff the listener closes,
     # so nothing else can ever connect.
     listeners =
       for stream <- [:out, :err], into: %{} do
-        sock_path = Path.join(scratch, "log-#{stream}.sock")
+        sock_path = Path.join(sock_dir, "log-#{stream}.sock")
         _ = File.rm(sock_path)
 
         {:ok, listener} =
@@ -114,6 +126,8 @@ defmodule Tank.Runtime.Logs do
     state = %{
       pod: pod,
       container: container,
+      scratch: scratch,
+      sock_dir: sock_dir,
       fd: fd,
       path: path,
       size: size,
@@ -179,6 +193,7 @@ defmodule Tank.Runtime.Logs do
     state = drain(state, 50)
     state = Enum.reduce(Map.keys(state.buffers), state, &flush_partial(&2, &1))
     :file.close(state.fd)
+    if state.sock_dir != state.scratch, do: File.rm_rf(state.sock_dir)
     :ok
   end
 

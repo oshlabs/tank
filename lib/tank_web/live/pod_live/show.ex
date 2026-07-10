@@ -40,6 +40,8 @@ defmodule TankWeb.PodLive.Show do
            session: nil,
            session_label: nil,
            term_size: {80, 24},
+           term_buffer: [],
+           term_buffered: 0,
            exec_cmd: "/bin/sh"
          )
          |> assign_row(row)}
@@ -119,8 +121,19 @@ defmodule TankWeb.PodLive.Show do
 
   def handle_info({:gooey_chart, _id, _event}, socket), do: {:noreply, socket}
 
-  # Terminal hook events.
-  def handle_info({:gooey_terminal, _id, :ready}, socket), do: {:noreply, socket}
+  # Terminal hook events. On (re)mount, replay the session's scrollback —
+  # the hook may have missed bytes that raced its async init, and a tab
+  # switch remounts it fresh.
+  def handle_info({:gooey_terminal, _id, :ready}, socket) do
+    if socket.assigns.term_buffer != [] do
+      send_update(Gooey.Components.Terminal,
+        id: term_id(socket.assigns.name),
+        write: Enum.reverse(socket.assigns.term_buffer)
+      )
+    end
+
+    {:noreply, socket}
+  end
 
   def handle_info({:gooey_terminal, _id, {:input, data}}, socket) do
     if socket.assigns.session, do: Tank.Console.write(socket.assigns.session, data)
@@ -137,15 +150,12 @@ defmodule TankWeb.PodLive.Show do
     case msg do
       {:data, bytes} ->
         send_update(Gooey.Components.Terminal, id: term_id(socket.assigns.name), write: bytes)
-        {:noreply, socket}
+        {:noreply, buffer_term(socket, bytes)}
 
       {:exit, reason} ->
-        send_update(Gooey.Components.Terminal,
-          id: term_id(socket.assigns.name),
-          write: "\r\n\e[2m[session ended: #{exit_text(reason)}]\e[0m\r\n"
-        )
-
-        {:noreply, assign(socket, session: nil, session_label: nil)}
+        banner = "\r\n\e[2m[session ended: #{exit_text(reason)}]\e[0m\r\n"
+        send_update(Gooey.Components.Terminal, id: term_id(socket.assigns.name), write: banner)
+        {:noreply, socket |> buffer_term(banner) |> assign(session: nil, session_label: nil)}
 
       :closed ->
         {:noreply, assign(socket, session: nil, session_label: nil)}
@@ -186,7 +196,14 @@ defmodule TankWeb.PodLive.Show do
 
     case Tank.Console.exec(socket.assigns.name, argv, cols: cols, rows: rows) do
       {:ok, session} ->
-        {:noreply, assign(socket, session: session, session_label: "exec: #{cmd}", exec_cmd: cmd)}
+        {:noreply,
+         assign(socket,
+           session: session,
+           session_label: "exec: #{cmd}",
+           exec_cmd: cmd,
+           term_buffer: [],
+           term_buffered: 0
+         )}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "exec failed: #{inspect(reason)}")}
@@ -198,7 +215,13 @@ defmodule TankWeb.PodLive.Show do
 
     case Tank.Console.attach(socket.assigns.name, cols: cols, rows: rows) do
       {:ok, session} ->
-        {:noreply, assign(socket, session: session, session_label: "attached to main process")}
+        {:noreply,
+         assign(socket,
+           session: session,
+           session_label: "attached to main process",
+           term_buffer: [],
+           term_buffered: 0
+         )}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, "attach failed: #{inspect(reason)}")}
@@ -269,6 +292,23 @@ defmodule TankWeb.PodLive.Show do
       text: entry.line
     }
   end
+
+  # Session scrollback, capped: chunks kept newest-first, oldest dropped.
+  @term_scrollback_cap 65_536
+  defp buffer_term(socket, bytes) do
+    {oldest_first, total} =
+      trim_term(
+        Enum.reverse([bytes | socket.assigns.term_buffer]),
+        socket.assigns.term_buffered + byte_size(bytes)
+      )
+
+    assign(socket, term_buffer: Enum.reverse(oldest_first), term_buffered: total)
+  end
+
+  defp trim_term([oldest | rest], total) when total > @term_scrollback_cap,
+    do: trim_term(rest, total - byte_size(oldest))
+
+  defp trim_term(buffer, total), do: {buffer, total}
 
   defp log_viewer_id(name), do: "logs-#{name}"
   defp term_id(name), do: "term-#{name}"
@@ -343,6 +383,7 @@ defmodule TankWeb.PodLive.Show do
               type="sparkline"
               streaming?
               window_ms={120_000}
+              series={[%{id: "cpu", data: []}]}
               class="w-24 h-8"
             />
           </:figure>
@@ -355,6 +396,7 @@ defmodule TankWeb.PodLive.Show do
               type="sparkline"
               streaming?
               window_ms={120_000}
+              series={[%{id: "mem", data: []}]}
               class="w-24 h-8"
             />
           </:figure>
@@ -367,6 +409,7 @@ defmodule TankWeb.PodLive.Show do
               type="sparkline"
               streaming?
               window_ms={120_000}
+              series={[%{id: "rx", data: []}]}
               class="w-24 h-8"
             />
           </:figure>
@@ -379,6 +422,7 @@ defmodule TankWeb.PodLive.Show do
               type="sparkline"
               streaming?
               window_ms={120_000}
+              series={[%{id: "tx", data: []}]}
               class="w-24 h-8"
             />
           </:figure>
@@ -407,6 +451,7 @@ defmodule TankWeb.PodLive.Show do
             streaming?
             window_ms={300_000}
             title="CPU"
+            series={[%{id: "cpu", label: "CPU", data: []}]}
             y_axis={%{min: 0, unit: "%"}}
             x_axis={%{type: "time", format: "clock"}}
             class="h-56"
@@ -418,6 +463,7 @@ defmodule TankWeb.PodLive.Show do
             streaming?
             window_ms={300_000}
             title="Memory"
+            series={[%{id: "mem", label: "Memory", data: []}]}
             y_axis={%{min: 0, format: "si"}}
             x_axis={%{type: "time", format: "clock"}}
             class="h-56"
@@ -450,7 +496,7 @@ defmodule TankWeb.PodLive.Show do
         />
       </section>
 
-      <section class={@live_action != :terminal && "hidden"}>
+      <section :if={@live_action == :terminal}>
         <div :if={@session == nil} class="grid gap-4 lg:grid-cols-2 mb-4">
           <.card>
             <:header>New shell</:header>

@@ -36,10 +36,7 @@ defmodule TankWeb.WebE2ETest do
     for pod <- Tank.list(), do: Tank.delete(pod.name)
 
     start_supervised!(
-      {Reconciler,
-       runtime: Tank.Runtime,
-       runtime_opts: [image: deck.image_opts],
-       interval: 500}
+      {Reconciler, runtime: Tank.Runtime, runtime_opts: [image: deck.image_opts], interval: 500}
     )
 
     start_supervised!({Tank.Stats, interval: 200})
@@ -87,6 +84,14 @@ defmodule TankWeb.WebE2ETest do
     assert output =~ "PATH="
     # The applet ran to completion: the session-ended banner followed.
     assert output =~ "session ended"
+
+    # A (re)mounting terminal hook gets the scrollback replayed — the fix for
+    # output racing the hook's init, and for tab-switch remounts.
+    view |> element("#term-webe2e") |> render_hook("term_ready", %{})
+    assert_push_event(view, "term_output", %{data: replay}, 5_000)
+    replay = replay <> collect_term_output(view)
+    assert replay =~ "PATH="
+    assert replay =~ "session ended"
 
     # --- restart ------------------------------------------------------------
     view |> element("button", "Restart") |> render_click()

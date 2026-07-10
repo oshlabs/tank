@@ -120,6 +120,26 @@ defmodule Tank.Runtime.LogsTest do
     assert Enum.map(entries, &byte_size(&1.line)) == [16_384, 20_000 - 16_384]
   end
 
+  test "a scratch dir too deep for sun_path falls back to short sockets", ctx do
+    pod = "logs-deep-#{System.unique_integer([:positive])}"
+    deep = Path.join([ctx.scratch, String.duplicate("d", 120)])
+
+    {:ok, col} = Collector.maybe_start(pod, "app", deep, ctx.base, dir: ctx.log_dir)
+    [_, {:stdout, {:connect_unix, out_path}}, _] = Collector.stdio(col)
+
+    # The socket landed somewhere connectable (short), not under the deep dir.
+    assert byte_size(out_path) < 100
+    out = connect!(out_path)
+    :ok = :gen_tcp.send(out, "deep ok\n")
+    :ok = :gen_tcp.close(out)
+    :ok = Collector.stop(col)
+
+    {:ok, [entry]} = Tank.logs(pod, dir: ctx.log_dir)
+    assert entry.line == "deep ok"
+    # The fallback dir was cleaned up with the collector.
+    refute File.dir?(Path.dirname(out_path))
+  end
+
   test "capture disabled: no collector, runtime falls back to :devnull", ctx do
     assert {:ok, nil} =
              Collector.maybe_start("logs-off", "app", ctx.scratch, ctx.base, enabled: false)
