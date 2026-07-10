@@ -104,6 +104,58 @@ defmodule Tank.RuntimeTest do
     assert_received {:tank, :exited, 0}
   end
 
+  test "volumes: managed rw + host read-only, witnessed from inside", %{deck: deck} do
+    data_dir = Path.join(System.tmp_dir!(), "tank-vol-#{System.unique_integer([:positive])}")
+    host_src = Path.join(data_dir, "host-src")
+    File.mkdir_p!(host_src)
+    File.write!(Path.join(host_src, "shipped"), "hello-ro\n")
+    on_exit(fn -> File.rm_rf!(data_dir) end)
+
+    p =
+      Pod.new!(%{
+        name: "rt-vol",
+        network: :none,
+        volumes: [%{name: "data"}, %{name: "conf", source: {:host, host_src}}],
+        containers: [
+          %{
+            name: "app",
+            image: deck.ref,
+            tty: true,
+            mounts: [
+              %{volume: "data", path: "/data"},
+              %{volume: "conf", path: "/conf", read_only: true}
+            ]
+          }
+        ]
+      })
+
+    {:ok, runtime} =
+      Runtime.start_link(p, owner: self(), image: deck.image_opts, data_dir: data_dir)
+
+    assert_receive {:tank, :running, _host_pid}, 15_000
+
+    # The managed volume was allocated under data_dir; drop a probe in from
+    # the host and read it back from inside the container (rw path), then
+    # read the pre-shipped file through the read-only host mount.
+    managed = Path.join([data_dir, "volumes", "data"])
+    assert File.dir?(managed)
+    File.write!(Path.join(managed, "probe"), "cargo\n")
+
+    {:ok, session} = Runtime.begin_attach(runtime, self())
+    :ok = Linx.Process.pty_write(session, "cat /data/probe\n")
+    assert pty_contains?("cargo", 5_000)
+    :ok = Linx.Process.pty_write(session, "cat /conf/shipped\n")
+    assert pty_contains?("hello-ro", 5_000)
+
+    # The pod's own /proc/mounts shows /conf sealed ro and /data rw.
+    :ok = Linx.Process.pty_write(session, "mounts\n")
+    {:ok, seen} = pty_until(~r{ /conf \S+ ro[,\s]}, 5_000)
+    assert seen =~ ~r{ /data \S+ rw[,\s]}
+
+    Runtime.end_attach(runtime)
+    GenServer.stop(runtime)
+  end
+
   describe "attach handoff (tty: true)" do
     test "begin_attach hands off the main PTY; detach leaves the workload running", %{deck: deck} do
       # The cat applet with no PATH echoes stdin: interactive, stays alive on
@@ -181,6 +233,29 @@ defmodule Tank.RuntimeTest do
   # until `needle` appears or the deadline passes.
   defp pty_contains?(needle, timeout) do
     pty_contains?(needle, "", System.monotonic_time(:millisecond) + timeout)
+  end
+
+  # Like pty_contains?/2 but regex-capable and returning the buffer, so a
+  # caller can make several assertions against one burst of output.
+  defp pty_until(regex, timeout) do
+    pty_until(regex, "", System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp pty_until(regex, seen, deadline) do
+    cond do
+      seen =~ regex ->
+        {:ok, seen}
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("pty: no match for #{inspect(regex)}; output so far: #{inspect(seen)}")
+
+      true ->
+        receive do
+          {:linx_process, :pty_out, bytes} -> pty_until(regex, seen <> bytes, deadline)
+        after
+          100 -> pty_until(regex, seen, deadline)
+        end
+    end
   end
 
   defp pty_contains?(needle, seen, deadline) do

@@ -16,12 +16,15 @@ defmodule Tank.Runtime.Rootfs do
     4. **`/dev`** — a fresh tmpfs with the standard device nodes bind-mounted
        from the host (`mknod` is barred in containers; binds are the way).
     5. **`/sys`** — recursive bind of the host's sysfs.
-    6. **`pivot_root`** into `rootfs`, then detach the old root.
+    6. **volumes** — each resolved `Tank.Mount` bind-mounted at its in-rootfs
+       path (read-only ones sealed with a `remount(:ro, :bind)`).
+    7. **`pivot_root`** into `rootfs`, then detach the old root.
 
   All mounts are set up *under* `rootfs` and come along with the pivot.
   """
 
   alias Linx.Mount
+  alias Tank.Runtime.Volumes
 
   # The device nodes a typical container expects under /dev.
   @device_nodes ~w(null zero full random urandom tty)
@@ -34,9 +37,15 @@ defmodule Tank.Runtime.Rootfs do
   `etc_files` is a list of `{host_path, in_rootfs_path}` to bind into the rootfs
   before the pivot — per-pod files (e.g. `/etc/resolv.conf`, `/etc/hosts`) that
   must not mutate the shared, content-addressed image rootfs.
+
+  `volume_mounts` is a list of `t:Tank.Runtime.Volumes.resolved/0` — host
+  directories bind-mounted at their in-rootfs paths before the pivot,
+  read-only ones sealed with a follow-up `remount(:ro, :bind)`.
   """
-  @spec setup(pos_integer(), Path.t(), [{Path.t(), Path.t()}]) :: :ok | {:error, term()}
-  def setup(host_pid, rootfs, etc_files \\ []) when is_integer(host_pid) and is_binary(rootfs) do
+  @spec setup(pos_integer(), Path.t(), [{Path.t(), Path.t()}], [Volumes.resolved()]) ::
+          :ok | {:error, term()}
+  def setup(host_pid, rootfs, etc_files \\ [], volume_mounts \\ [])
+      when is_integer(host_pid) and is_binary(rootfs) do
     in_ns = [in: {:pid, host_pid}]
 
     with :ok <- rec_private(in_ns),
@@ -45,6 +54,7 @@ defmodule Tank.Runtime.Rootfs do
          :ok <- mount_dev(rootfs, in_ns),
          :ok <- mount_sys(rootfs, in_ns),
          :ok <- bind_etc_files(rootfs, etc_files, in_ns),
+         :ok <- mount_volumes(rootfs, volume_mounts, in_ns),
          :ok <- pivot(rootfs, in_ns) do
       :ok
     end
@@ -104,6 +114,34 @@ defmodule Tank.Runtime.Rootfs do
       end
     end)
   end
+
+  defp mount_volumes(rootfs, volume_mounts, in_ns) do
+    Enum.reduce_while(volume_mounts, :ok, fn %{source: src, path: path, read_only: ro}, :ok ->
+      target = Path.join(rootfs, String.trim_leading(path, "/"))
+
+      # The mount-point dir is created through the host-visible rootfs path —
+      # an empty dir in the shared, content-addressed image rootfs is benign
+      # (same acceptance as pivot's /old_root below).
+      with :ok <- mkdir(target),
+           :ok <- Mount.bind(src, target, in_ns),
+           :ok <- seal(target, ro, in_ns) do
+        {:cont, :ok}
+      else
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  defp mkdir(target) do
+    case File.mkdir_p(target) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:mount_target, target, reason}}
+    end
+  end
+
+  # A bind can't be born read-only (kernel quirk); seal it with a remount.
+  defp seal(_target, false, _in_ns), do: :ok
+  defp seal(target, true, in_ns), do: Mount.remount(target, [flags: [:ro, :bind]] ++ in_ns)
 
   defp pivot(rootfs, in_ns) do
     # pivot_root needs an existing dir under the new root for the old root. An

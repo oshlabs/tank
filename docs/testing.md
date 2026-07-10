@@ -53,7 +53,9 @@ attach flagship (a real bash driven interactively — the M5.5 criterion).
   entrypoint/cmd/env merging, `/etc` materialization + DNS fallback chain.
 - **Image layer**: pull/caching/content-addressing/offline/index-resolution
   against the local registry, incl. the absolute-symlink tar case.
-- **Runtime layer**: rootfs+netns+cgroup bring-up and teardown; every
+- **Runtime layer**: rootfs+netns+cgroup bring-up and teardown; volumes
+  (managed allocation, host binds, read-only sealing — witnessed from inside
+  the pod via `cat` + `/proc/mounts`); every
   workload-exit shape pinned to its supervision reason — KILL →
   `{:shutdown, {:workload_signaled, 9}}`, `exit 3` →
   `{:shutdown, {:workload_exited, 3}}`, graceful TERM (await-sig) →
@@ -77,7 +79,7 @@ the *refusals* honestly (`{:nic_mode_unsupported, _}`, the `:dhcp` warning).
 | feature | spec layer | runtime | tracked |
 |---|---|---|---|
 | multi-container pods | ✅ | runs first container only | PLAN M7 |
-| volumes / mounts | ✅ `Tank.Volume`/`Mount` | **never mounted** | needed for Hive-as-tapp (plan Track 2) |
+| ~~volumes / mounts~~ | ✅ | **actuated 2026-07-10** — managed dirs under `data_dir/volumes`, host binds, ro sealing; e2e witnesses rw/ro from inside via `/proc/mounts` | done |
 | log capture | — | stdio → `/dev/null` | PLAN (later) |
 | `:dhcp` NICs | ✅ | warns, leaves NIC bare | wire Starfish's DHCP client |
 | `:bridge` / `:ipvlan` | ✅ modelled | hard error | `docs/networking.md` [modelled] |

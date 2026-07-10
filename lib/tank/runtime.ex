@@ -46,7 +46,7 @@ defmodule Tank.Runtime do
 
   alias Linx.Process, as: Workload
   alias Tank.{Container, Net, OCI, Pod}
-  alias Tank.Runtime.{Etc, Limits, Network, Rootfs}
+  alias Tank.Runtime.{Etc, Limits, Network, Rootfs, Volumes}
 
   # Always-fresh namespaces; :net is added unless the pod shares the host's.
   @base_namespaces [:mount, :pid, :uts, :ipc]
@@ -137,6 +137,8 @@ defmodule Tank.Runtime do
           scratch: nil,
           rootfs: nil,
           etc_files: [],
+          # Resolved at bring-up: container mounts as host-source bind specs.
+          volume_mounts: [],
           # The pod's network with {:ipam, _} intents resolved (at bring-up).
           network: nil,
           # The container's resolved run env/cwd, stashed for Tank.exec.
@@ -175,6 +177,7 @@ defmodule Tank.Runtime do
     with {:ok, rootfs, config} <- resolve_image(state.container, state.image_opts),
          {:ok, run} <- OCI.run_params(state.container, config),
          {:ok, network} <- Net.resolve(state.pod),
+         {:ok, volume_mounts} <- Volumes.resolve(state.pod, state.container, state.data_dir),
          etc_files = Etc.materialize(%{state.pod | network: network}, scratch),
          {:ok, session} <- spawn_workload(state.pod, state.container, run) do
       {:noreply,
@@ -184,6 +187,7 @@ defmodule Tank.Runtime do
            rootfs: rootfs,
            scratch: scratch,
            etc_files: etc_files,
+           volume_mounts: volume_mounts,
            network: network,
            env: run.env,
            working_dir: run.cwd
@@ -288,7 +292,7 @@ defmodule Tank.Runtime do
   # Runs in the child's namespaces, host-side, while the workload waits. The
   # network was already resolved (intents → concrete addresses) at bring-up.
   defp bring_up(state, host_pid) do
-    with :ok <- Rootfs.setup(host_pid, state.rootfs, state.etc_files),
+    with :ok <- Rootfs.setup(host_pid, state.rootfs, state.etc_files, state.volume_mounts),
          :ok <- Network.setup(host_pid, state.network),
          {:ok, cgroup} <- Limits.apply(state.pod.name, host_pid, state.container.limits) do
       {:ok, cgroup}
