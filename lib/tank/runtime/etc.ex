@@ -8,17 +8,25 @@ defmodule Tank.Runtime.Etc do
 
   alias Tank.{Host, Pod}
 
-  @doc "Write resolv.conf + hosts into `dir`; return the bind pairs for the rootfs."
+  @doc "Write resolv.conf + hosts + hostname into `dir`; return the bind pairs for the rootfs."
   @spec materialize(Pod.t(), Path.t()) :: [{Path.t(), Path.t()}]
   def materialize(%Pod{} = pod, dir) do
     File.mkdir_p!(dir)
 
     resolv = Path.join(dir, "resolv.conf")
     hosts = Path.join(dir, "hosts")
+    hostname = Path.join(dir, "hostname")
     File.write!(resolv, resolv_conf(pod))
     File.write!(hosts, hosts_file(pod))
+    # The file counterpart of the UTS hostname the runtime sets at bring-up —
+    # images bake their build hostname in (debian: "debuerreotype").
+    File.write!(hostname, pod.name <> "\n")
 
-    [{resolv, "/etc/resolv.conf"}, {hosts, "/etc/hosts"}]
+    [
+      {resolv, "/etc/resolv.conf"},
+      {hosts, "/etc/hosts"},
+      {hostname, "/etc/hostname"}
+    ]
   end
 
   # A networked pod that names its own DNS uses it; one that doesn't inherits the

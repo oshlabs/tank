@@ -352,7 +352,25 @@ defmodule Tank.Runtime do
     with :ok <- Rootfs.setup(host_pid, state.rootfs, state.etc_files, state.volume_mounts),
          :ok <- Network.setup(host_pid, state.network),
          {:ok, cgroup} <- Limits.apply(state.pod.name, host_pid, state.container.limits) do
+      set_hostname(state.pod.name, host_pid)
       {:ok, cgroup}
+    end
+  end
+
+  # The pod's UTS hostname is its name — that's what the fresh :uts namespace
+  # is for, and what the DNS layer already assumes. kernel.hostname is a
+  # sysctl, so Linx's per-namespace writer sets it from the host; without
+  # this, pods keep whatever hostname the image baked in (debian images ship
+  # "debuerreotype", the tool that built them). Soft-fail: a denied write
+  # (exotic LSM) shouldn't stop a pod over a cosmetic name.
+  defp set_hostname(name, host_pid) do
+    case Linx.Sysctl.write("kernel/hostname", name, in: {:pid, host_pid}) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Tank.Runtime[#{name}]: could not set hostname: #{inspect(reason)}")
+        :ok
     end
   end
 
