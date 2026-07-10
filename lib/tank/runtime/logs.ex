@@ -28,6 +28,11 @@ defmodule Tank.Runtime.Logs do
 
   alias Tank.Logs
 
+  # A workload that never writes a newline must not grow the collector
+  # without bound: past this, the partial-line buffer is force-flushed as a
+  # line (Docker's json-file driver splits around 16 KiB the same way).
+  @max_line_bytes 16_384
+
   # === API =================================================================
 
   @doc """
@@ -219,8 +224,18 @@ defmodule Tank.Runtime.Logs do
     buffered = Map.get(state.buffers, stream, "") <> data
     {complete, rest} = String.split(buffered, "\n") |> Enum.split(-1)
     state = Enum.reduce(complete, state, &write_line(&2, stream, &1))
-    %{state | buffers: Map.put(state.buffers, stream, hd(rest))}
+    cap_partial(state, stream, hd(rest))
   end
+
+  # Force-flush an over-long unterminated line in @max_line_bytes slices;
+  # anything shorter just waits in the buffer for its newline (or EOF).
+  defp cap_partial(state, stream, partial) when byte_size(partial) >= @max_line_bytes do
+    <<line::binary-size(@max_line_bytes), rest::binary>> = partial
+    cap_partial(write_line(state, stream, line), stream, rest)
+  end
+
+  defp cap_partial(state, stream, partial),
+    do: %{state | buffers: Map.put(state.buffers, stream, partial)}
 
   defp flush_partial(state, stream) do
     case Map.get(state.buffers, stream, "") do

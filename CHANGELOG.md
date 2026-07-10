@@ -19,7 +19,9 @@ All notable changes to Tank are documented here. The format is based on
   `Tank.Logs.subscribe/1` / `unsubscribe/1` (live `{:tank_logs, pod, entry}`
   messages). Configuration under `config :tank, :logs` (`dir`,
   `max_file_bytes`, `max_files`, `enabled` — set `enabled: false` for the old
-  behaviour). Requires linx newer than 0.2.0 (host-side `connect_unix`).
+  behaviour). Lines cap at 16 KiB (a newline-less stream is force-flushed in
+  slices, bounding collector memory). Requires linx newer than 0.2.0
+  (host-side `connect_unix`).
 
 ## [0.2.0] - 2026-06-06
 

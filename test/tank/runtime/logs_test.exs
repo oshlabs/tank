@@ -99,6 +99,27 @@ defmodule Tank.Runtime.LogsTest do
     assert length(entries) >= 2
   end
 
+  test "a stream that never writes a newline is force-flushed at the line cap", ctx do
+    pod = "logs-cap-#{System.unique_integer([:positive])}"
+    col = start_collector(pod, ctx)
+    :ok = Tank.Logs.subscribe(pod)
+
+    [_, {:stdout, {:connect_unix, out_path}}, _] = Collector.stdio(col)
+    out = connect!(out_path)
+
+    # 20 000 newline-less bytes: 16 KiB must flush as a line immediately
+    # (bounding collector memory); the 3 616-byte remainder waits for EOF.
+    :ok = :gen_tcp.send(out, String.duplicate("x", 20_000))
+    assert_receive {:tank_logs, ^pod, %{stream: :out, line: line}}, 2_000
+    assert byte_size(line) == 16_384
+
+    :ok = :gen_tcp.close(out)
+    :ok = Collector.stop(col)
+
+    {:ok, entries} = Tank.logs(pod, dir: ctx.log_dir)
+    assert Enum.map(entries, &byte_size(&1.line)) == [16_384, 20_000 - 16_384]
+  end
+
   test "capture disabled: no collector, runtime falls back to :devnull", ctx do
     assert {:ok, nil} =
              Collector.maybe_start("logs-off", "app", ctx.scratch, ctx.base, enabled: false)

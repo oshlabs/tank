@@ -48,6 +48,9 @@ defmodule Tank.Logs do
     * Capture rides the pod's lifecycle: bytes the workload writes in the
       instant the runtime is torn down can be lost (the collector drains
       briefly on stop, so in practice the tail survives normal exits).
+    * A line is capped at 16 KiB: a stream that never emits a newline is
+      force-flushed in 16 KiB slices, so an entry's `line` may be a
+      fragment of a longer write.
   """
 
   @registry Tank.Logs.Registry
