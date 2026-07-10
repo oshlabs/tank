@@ -49,14 +49,33 @@ defmodule Tank do
   def apply(spec) do
     with {:ok, pod} <- to_pod(spec),
          :ok <- Store.put_pod(pod) do
+      Tank.Events.broadcast(:pods, %{name: pod.name, status: :applied, at: DateTime.utc_now()})
       nudge()
     end
   end
 
   @doc "Remove a pod's desired state, by name or by `%Tank.Pod{}`."
   @spec delete(String.t() | Pod.t()) :: :ok | {:error, term()}
-  def delete(name) when is_binary(name), do: with(:ok <- Store.delete_pod(name), do: nudge())
+  def delete(name) when is_binary(name) do
+    with :ok <- Store.delete_pod(name) do
+      Tank.Events.broadcast(:pods, %{name: name, status: :deleted, at: DateTime.utc_now()})
+      nudge()
+    end
+  end
+
   def delete(%Pod{name: name}), do: delete(name)
+
+  @doc """
+  Stop a pod's workload and start it fresh — retries reset, backoff cleared.
+  The desired state is untouched. `{:error, :not_found}` for an undeclared
+  pod; `{:error, :unavailable}` when the reconciler isn't running.
+  """
+  @spec restart(String.t()) :: :ok | {:error, :not_found | :unavailable}
+  def restart(name) when is_binary(name) do
+    Reconciler.restart_pod(name)
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
 
   @doc "Fetch one declared pod by name."
   @spec get(String.t()) :: {:ok, Pod.t()} | {:error, :not_found}
@@ -65,6 +84,66 @@ defmodule Tank do
   @doc "Every declared pod (a fast read through the store's projection)."
   @spec list() :: [Pod.t()]
   def list, do: Store.list_pods()
+
+  @typedoc """
+  Desired ∪ observed: the declared pod plus what the reconciler knows about
+  it right now. `:pending` = declared but not (yet) tracked — the start
+  failed or hasn't been attempted; the next resync retries.
+  """
+  @type pod_status :: %{
+          pod: Pod.t(),
+          status: :pending | :starting | :running | :backing_off | :terminal,
+          retries: non_neg_integer(),
+          host_pid: pos_integer() | nil,
+          last_exit: Tank.Events.last_exit() | nil,
+          last_exit_at: DateTime.t() | nil,
+          started_at: DateTime.t() | nil,
+          restart_at: DateTime.t() | nil
+        }
+
+  @doc """
+  The merged status of every declared pod, sorted by name. Live updates:
+  subscribe to `Tank.Events`' `:pods` topic and re-read.
+  """
+  @spec status() :: [pod_status()]
+  def status do
+    observed = observed_status()
+
+    list()
+    |> Enum.map(&merge_status(&1, Map.get(observed, &1.name)))
+    |> Enum.sort_by(& &1.pod.name)
+  end
+
+  @doc "The merged status of one pod. `{:error, :not_found}` if not declared."
+  @spec status(String.t()) :: {:ok, pod_status()} | {:error, :not_found}
+  def status(name) when is_binary(name) do
+    with {:ok, pod} <- get(name) do
+      {:ok, merge_status(pod, Map.get(observed_status(), name))}
+    end
+  end
+
+  defp merge_status(pod, nil) do
+    %{
+      pod: pod,
+      status: :pending,
+      retries: 0,
+      host_pid: nil,
+      last_exit: nil,
+      last_exit_at: nil,
+      started_at: nil,
+      restart_at: nil
+    }
+  end
+
+  defp merge_status(pod, observed), do: Map.put(observed, :pod, pod)
+
+  # The reconciler may be down (embedder without one, tests): everything is
+  # then honestly :pending rather than an exit.
+  defp observed_status do
+    Reconciler.status()
+  catch
+    :exit, _ -> %{}
+  end
 
   @doc """
   The last captured log entries for a pod, oldest first (`tail: 200` by

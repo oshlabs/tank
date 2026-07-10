@@ -31,7 +31,7 @@ defmodule Tank.RuntimeTest do
 
     {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
 
-    assert_receive {:tank, :running, host_pid}, 15_000
+    assert_receive {:tank, _, {:running, host_pid}}, 15_000
     assert {:ok, ^host_pid} = Runtime.host_pid(runtime)
 
     # The cgroup carries the memory limit, and holds the workload.
@@ -50,7 +50,7 @@ defmodule Tank.RuntimeTest do
     p = deck_pod("rt-nolimits", deck)
     {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
 
-    assert_receive {:tank, :running, _host_pid}, 15_000
+    assert_receive {:tank, _, {:running, _host_pid}}, 15_000
     refute File.dir?("/sys/fs/cgroup/tank/rt-nolimits")
 
     GenServer.stop(runtime)
@@ -63,7 +63,7 @@ defmodule Tank.RuntimeTest do
 
     p = deck_pod("rt-signal", deck)
     {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
-    assert_receive {:tank, :running, host_pid}, 15_000
+    assert_receive {:tank, _, {:running, host_pid}}, 15_000
     ref = Process.monitor(runtime)
 
     {_, 0} = System.cmd("kill", ["-KILL", Integer.to_string(host_pid)])
@@ -94,13 +94,13 @@ defmodule Tank.RuntimeTest do
 
     p = deck_pod("rt-graceful", deck, %{command: ["/bin/await-sig"]}, %{restart: :never})
     {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
-    assert_receive {:tank, :running, host_pid}, 15_000
+    assert_receive {:tank, _, {:running, host_pid}}, 15_000
     ref = Process.monitor(runtime)
 
     {_, 0} = System.cmd("kill", ["-TERM", Integer.to_string(host_pid)])
 
     assert_receive {:DOWN, ^ref, :process, ^runtime, :normal}, 15_000
-    assert_received {:tank, :exited, 0}
+    assert_received {:tank, _, {:exited, 0}}
   end
 
   test "volumes: managed rw + host read-only, witnessed from inside", %{deck: deck} do
@@ -131,7 +131,7 @@ defmodule Tank.RuntimeTest do
     {:ok, runtime} =
       Runtime.start_link(p, owner: self(), image: deck.image_opts, data_dir: data_dir)
 
-    assert_receive {:tank, :running, _host_pid}, 15_000
+    assert_receive {:tank, _, {:running, _host_pid}}, 15_000
 
     # The managed volume was allocated under data_dir; drop a probe in from
     # the host and read it back from inside the container (rw path), then
@@ -214,7 +214,7 @@ defmodule Tank.RuntimeTest do
       # a PTY — the /bin/cat main-process shape, no distro needed.
       p = deck_pod("rt-attach", deck, %{command: ["/bin/cat"], tty: true})
       {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
-      assert_receive {:tank, :running, _host_pid}, 15_000
+      assert_receive {:tank, _, {:running, _host_pid}}, 15_000
 
       # Hand the session to this test; we become the owner of :pty_out.
       {:ok, session} = Runtime.begin_attach(runtime, self())
@@ -237,7 +237,7 @@ defmodule Tank.RuntimeTest do
         deck_pod("rt-attach-exit", deck, %{command: ["/bin/cat"], tty: true}, %{restart: :never})
 
       {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
-      assert_receive {:tank, :running, _host_pid}, 15_000
+      assert_receive {:tank, _, {:running, _host_pid}}, 15_000
 
       # The runtime stops abnormally below; trap its linked exit so it doesn't
       # take the test process down with it.
@@ -256,13 +256,13 @@ defmodule Tank.RuntimeTest do
       # production the reconciler would apply the restart policy.
       :ok = Runtime.end_attach(runtime)
       assert_receive {:DOWN, ^ref, :process, ^runtime, _}, 5_000
-      assert_received {:tank, :signaled, 9}
+      assert_received {:tank, _, {:signaled, 9}}
     end
 
     test "begin_attach refuses a non-tty container with :not_a_tty", %{deck: deck} do
       p = deck_pod("rt-attach-notty", deck)
       {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
-      assert_receive {:tank, :running, _host_pid}, 15_000
+      assert_receive {:tank, _, {:running, _host_pid}}, 15_000
 
       assert {:error, :not_a_tty} = Runtime.begin_attach(runtime, self())
 
@@ -274,7 +274,7 @@ defmodule Tank.RuntimeTest do
       # environment the workload actually received — no shell expansion needed.
       p = deck_pod("rt-term", deck, %{tty: true})
       {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
-      assert_receive {:tank, :running, _host_pid}, 15_000
+      assert_receive {:tank, _, {:running, _host_pid}}, 15_000
 
       {:ok, session} = Runtime.begin_attach(runtime, self())
       :ok = Linx.Process.pty_write(session, "env\n")

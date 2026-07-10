@@ -195,4 +195,134 @@ defmodule Tank.ReconcilerTest do
   defp wait_running(r) do
     eventually(fn -> match?(%{"loop" => _}, Reconciler.running(r)) && Reconciler.running(r) end)
   end
+
+  # === events + merged status + restart ====================================
+
+  # A stub that plays the runtime's owner contract: announces
+  # {:tank, name, {:running, host_pid}} to its :owner (the reconciler).
+  defmodule AnnouncingRuntime do
+    use GenServer
+
+    def child_spec({pod, opts}) do
+      %{
+        id: {__MODULE__, pod.name},
+        start: {__MODULE__, :start_link, [{pod, opts}]},
+        restart: :temporary
+      }
+    end
+
+    def start_link({pod, opts}), do: GenServer.start_link(__MODULE__, {pod, opts})
+
+    @impl true
+    def init({pod, opts}) do
+      if owner = opts[:owner], do: send(owner, {:tank, pod.name, {:running, 4242}})
+      {:ok, pod}
+    end
+  end
+
+  defp announcing_reconciler(_ctx) do
+    pid =
+      start_supervised!(
+        {Reconciler,
+         name: :announcing_reconciler_under_test,
+         runtime: AnnouncingRuntime,
+         interval: :timer.hours(1),
+         backoff_base: 20,
+         backoff_cap: 200,
+         stable_window: :timer.seconds(30)},
+        id: :announcing_reconciler
+      )
+
+    {:ok, announcing: pid}
+  end
+
+  describe "events and merged status" do
+    setup :announcing_reconciler
+
+    test "a pod's lifecycle broadcasts :applied → :starting → :running", %{announcing: r} do
+      :ok = Tank.Events.subscribe(:pods)
+
+      :ok = Tank.apply(pod("evt"))
+      assert_receive {:tank_event, :pods, %{name: "evt", status: :applied}}
+
+      :ok = Reconciler.sync(r)
+      assert_receive {:tank_event, :pods, %{name: "evt", status: :starting, host_pid: nil}}
+      assert_receive {:tank_event, :pods, %{name: "evt", status: :running, host_pid: 4242}}
+
+      assert %{status: :running, host_pid: 4242} = Reconciler.status(r)["evt"]
+    end
+
+    test "a workload exit keeps its reason and broadcasts :backing_off", %{announcing: r} do
+      :ok = Tank.Events.subscribe(:pods)
+      :ok = Tank.apply(pod("crash", %{restart: :always}))
+      :ok = Reconciler.sync(r)
+      assert_receive {:tank_event, :pods, %{name: "crash", status: :running}}
+
+      %{"crash" => pid} = Reconciler.running(r)
+      GenServer.stop(pid, {:shutdown, {:workload_exited, 3}})
+
+      assert_receive {:tank_event, :pods,
+                      %{
+                        name: "crash",
+                        status: :backing_off,
+                        last_exit: {:exited, 3},
+                        retries: 1,
+                        restart_in_ms: delay
+                      }}
+
+      assert is_integer(delay) and delay >= 20
+
+      obs = Reconciler.status(r)["crash"]
+      assert obs.last_exit == {:exited, 3}
+      assert %DateTime{} = obs.last_exit_at
+      assert %DateTime{} = obs.restart_at
+    end
+
+    test "Tank.delete broadcasts :deleted", %{announcing: r} do
+      :ok = Tank.apply(pod("gone"))
+      :ok = Reconciler.sync(r)
+
+      :ok = Tank.Events.subscribe(:pods)
+      :ok = Tank.delete("gone")
+      assert_receive {:tank_event, :pods, %{name: "gone", status: :deleted}}
+    end
+
+    test "Tank.status/0 merges desired and observed", %{announcing: r} do
+      :ok = Tank.apply(pod("merged"))
+      :ok = Reconciler.sync(r)
+
+      # This reconciler is named, so the default-name lookup inside
+      # Tank.status/0 sees no reconciler — the pod reads :pending. The
+      # per-entry merge itself is what we assert here.
+      assert [%{pod: %Tank.Pod{name: "merged"}, status: :pending}] = Tank.status()
+
+      # And through the named server, the observed side is all there.
+      assert %{status: :running, host_pid: 4242, retries: 0} =
+               Reconciler.status(r)["merged"]
+    end
+
+    test "restart_pod stops the workload and starts fresh with retries reset", %{announcing: r} do
+      :ok = Tank.apply(pod("bounce", %{restart: :always}))
+      :ok = Reconciler.sync(r)
+      %{"bounce" => pid1} = Reconciler.running(r)
+
+      # Crash once so retries is non-zero.
+      GenServer.stop(pid1, {:shutdown, {:workload_signaled, 9}})
+      assert eventually(fn -> Reconciler.status(r)["bounce"][:retries] == 1 end)
+
+      :ok = Reconciler.restart_pod(r, "bounce")
+
+      assert eventually(fn ->
+               match?(
+                 %{status: status, retries: 0} when status in [:starting, :running],
+                 Reconciler.status(r)["bounce"]
+               )
+             end)
+
+      %{"bounce" => pid2} = Reconciler.running(r)
+      refute pid2 == pid1
+
+      assert {:error, :not_found} = Reconciler.restart_pod(r, "nope")
+    end
+  end
 end

@@ -30,7 +30,7 @@ defmodule Tank.AttachFlagshipTest do
       })
 
     {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
-    assert_receive {:tank, :running, _host_pid}, 30_000
+    assert_receive {:tank, _, {:running, _host_pid}}, 30_000
 
     # Take over the main bash's terminal (what Tank.attach/1 does internally).
     {:ok, session} = Runtime.begin_attach(runtime, self())

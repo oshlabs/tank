@@ -25,11 +25,12 @@ defmodule Tank.Runtime do
 
   ## Owner events
 
-  The `:owner` option receives:
+  The `:owner` option receives `{:tank, pod_name, event}` — name-attributed
+  so one owner (the reconciler) can watch every runtime:
 
-    * `{:tank, :running, host_pid}` — configured and running.
-    * `{:tank, :exited, code}` / `{:tank, :signaled, signum}` /
-      `{:tank, :error, reason}` — terminal.
+    * `{:tank, name, {:running, host_pid}}` — configured and running.
+    * `{:tank, name, {:exited, code}}` / `{:tank, name, {:signaled, signum}}`
+      / `{:tank, name, {:error, reason}}` — terminal.
 
   The GenServer stops when its workload terminates: a clean exit → `:normal`, a
   non-zero exit or signal → `{:shutdown, {:workload_exited | :workload_signaled,
@@ -267,12 +268,12 @@ defmodule Tank.Runtime do
   end
 
   def handle_info({:linx_process, :running}, state) do
-    notify(state, {:tank, :running, state.host_pid})
+    notify(state, {:running, state.host_pid})
     {:noreply, state}
   end
 
   def handle_info({:linx_process, :exited, 0}, state) do
-    notify(state, {:tank, :exited, 0})
+    notify(state, {:exited, 0})
     {:stop, :normal, state}
   end
 
@@ -280,24 +281,24 @@ defmodule Tank.Runtime do
   # crash — stop under a `:shutdown` reason so OTP doesn't log a crash report.
   # The reconciler still sees a non-`:normal` reason and restarts per policy.
   def handle_info({:linx_process, :exited, code}, state) do
-    notify(state, {:tank, :exited, code})
+    notify(state, {:exited, code})
     {:stop, {:shutdown, {:workload_exited, code}}, state}
   end
 
   def handle_info({:linx_process, :signaled, signum}, state) do
-    notify(state, {:tank, :signaled, signum})
+    notify(state, {:signaled, signum})
     {:stop, {:shutdown, {:workload_signaled, signum}}, state}
   end
 
   def handle_info({:linx_process, :error, errno, stage}, state) do
-    notify(state, {:tank, :error, {errno, stage}})
+    notify(state, {:error, {errno, stage}})
     {:stop, {:workload_error, errno, stage}, state}
   end
 
   # The workload session is linked; with trap_exit on, its unexpected death
   # arrives here (it normally lingers post-exit, so this means it crashed).
   def handle_info({:EXIT, session, reason}, %{session: session} = state) do
-    notify(state, {:tank, :error, {:session_down, reason}})
+    notify(state, {:error, {:session_down, reason}})
     {:stop, {:session_down, reason}, state}
   end
 
@@ -375,22 +376,22 @@ defmodule Tank.Runtime do
   def handle_call(:end_attach, _from, state), do: {:reply, :ok, state}
 
   defp reclaim_terminal({:exited, 0}, state) do
-    notify(state, {:tank, :exited, 0})
+    notify(state, {:exited, 0})
     {:stop, :normal, :ok, state}
   end
 
   defp reclaim_terminal({:exited, code}, state) do
-    notify(state, {:tank, :exited, code})
+    notify(state, {:exited, code})
     {:stop, {:shutdown, {:workload_exited, code}}, :ok, state}
   end
 
   defp reclaim_terminal({:signaled, signum}, state) do
-    notify(state, {:tank, :signaled, signum})
+    notify(state, {:signaled, signum})
     {:stop, {:shutdown, {:workload_signaled, signum}}, :ok, state}
   end
 
   defp reclaim_terminal(other, state) do
-    notify(state, {:tank, :error, other})
+    notify(state, {:error, other})
     {:stop, {:workload_terminated, other}, :ok, state}
   end
 
@@ -410,8 +411,10 @@ defmodule Tank.Runtime do
 
   # === helpers ==============================================================
 
-  defp notify(%{owner: nil}, _msg), do: :ok
-  defp notify(%{owner: owner}, msg), do: send(owner, msg)
+  defp notify(%{owner: nil}, _event), do: :ok
+
+  defp notify(%{owner: owner, pod: %{name: name}}, event),
+    do: send(owner, {:tank, name, event})
 
   defp default_data_dir do
     Application.get_env(:tank, :data_dir) || Path.join(System.tmp_dir!(), "tank")

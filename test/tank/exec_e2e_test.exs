@@ -52,7 +52,7 @@ defmodule Tank.ExecE2ETest do
       })
 
     :ok = Reconciler.sync(r)
-    assert_receive {:tank, :running, keepalive_pid}, 20_000
+    assert_receive {:tank, _, {:running, keepalive_pid}}, 20_000
 
     # Resolve the running pod -> its container's exec context, exactly as
     # Tank.exec. The context's env is the *container's* (the image's Env).
@@ -118,7 +118,7 @@ defmodule Tank.ExecE2ETest do
       })
 
     :ok = Reconciler.sync(r)
-    assert_receive {:tank, :running, _}, 20_000
+    assert_receive {:tank, _, {:running, _}}, 20_000
     assert %{"ex1" => runtime} = Reconciler.running(r)
     assert {:ok, ctx} = Runtime.exec_context(runtime)
 

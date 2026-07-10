@@ -64,7 +64,7 @@ defmodule Tank.NetFlagshipE2eTest do
       )
 
     {:ok, runtime} = Runtime.start_link(pod, owner: self(), image: deck.image_opts)
-    assert_receive {:tank, :running, _host_pid}, 30_000
+    assert_receive {:tank, _, {:running, _host_pid}}, 30_000
 
     assert [shim_ip] = Net.dns_ips()
     {:ok, alloc} = IPAM.lookup({:tank_pod, "flag", "eth0"})

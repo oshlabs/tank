@@ -45,7 +45,7 @@ defmodule Tank.ReconcilerE2ETest do
 
     # The reconciler started the runtime; the runtime brought the container up.
     :ok = Reconciler.sync(r)
-    assert_receive {:tank, :running, host_pid}, 20_000
+    assert_receive {:tank, _, {:running, host_pid}}, 20_000
     assert File.dir?("/proc/#{host_pid}")
     assert %{"e2e" => _} = Reconciler.running(r)
 

@@ -20,7 +20,8 @@ defmodule Tank.Reconciler do
 
   ## Crash handling
 
-  Each pod carries a status: `:running`, `:backing_off`, or `:terminal`. When a
+  Each pod carries a status: `:starting` (runtime up, workload not yet
+  confirmed running), `:running`, `:backing_off`, or `:terminal`. When a
   runtime exits unexpectedly, the loop honours the pod's `:restart` policy
   (`:always`; `:on_failure` only on an abnormal exit; `:never`):
 
@@ -42,6 +43,15 @@ defmodule Tank.Reconciler do
     * `:stable_window` — a run lasting at least this long (ms) resets the
       backoff (default 600_000).
     * `:name` — GenServer name (default `Tank.Reconciler`).
+
+  ## Events
+
+  Every observed transition (`:starting`/`:running`/`:backing_off`/
+  `:terminal`) is broadcast on `Tank.Events`' `:pods` topic; desired-state
+  changes (`:applied`/`:deleted`) come from the `Tank` facade. The
+  reconciler is every runtime's `:owner` (that's how it learns `host_pid`);
+  an embedder-supplied `:owner` still gets a copy of each
+  `{:tank, name, event}` message.
   """
 
   use GenServer
@@ -74,13 +84,28 @@ defmodule Tank.Reconciler do
   @spec sync(GenServer.server(), timeout()) :: :ok
   def sync(server \\ __MODULE__, timeout \\ 5_000), do: GenServer.call(server, :sync, timeout)
 
-  @doc "The pods currently running, as `name => runtime_pid`."
+  @doc """
+  The pods with a live runtime, as `name => runtime_pid` (status `:starting`
+  or `:running` — exec/attach still gate on the runtime's own
+  `exec_context/1`, which answers `:not_running` until bring-up completes).
+  """
   @spec running(GenServer.server()) :: %{optional(String.t()) => pid()}
   def running(server \\ __MODULE__), do: GenServer.call(server, :running)
 
-  @doc "Each tracked pod's `%{status:, retries:}`. Mainly for introspection/tests."
+  @doc """
+  Each tracked pod's observed state: `%{status:, retries:, host_pid:,
+  last_exit:, last_exit_at:, started_at:, restart_at:}`. The merged
+  desired-plus-observed view is `Tank.status/0`.
+  """
   @spec status(GenServer.server()) :: %{optional(String.t()) => map()}
   def status(server \\ __MODULE__), do: GenServer.call(server, :status)
+
+  @doc """
+  Stop a pod's runtime and start it fresh (retries reset) — the UI's Restart.
+  `{:error, :not_found}` if the pod isn't in desired state.
+  """
+  @spec restart_pod(GenServer.server(), String.t()) :: :ok | {:error, :not_found}
+  def restart_pod(server \\ __MODULE__, name), do: GenServer.call(server, {:restart_pod, name})
 
   # === lifecycle ============================================================
 
@@ -99,7 +124,9 @@ defmodule Tank.Reconciler do
       stable_window: Keyword.get(opts, :stable_window, :timer.minutes(10)),
       timer: nil,
       debounce: nil,
-      # name => %{pod, status, pid, ref, retries, start_at, restart_timer}
+      # name => %{pod, status, pid, ref, retries, start_at (monotonic, for
+      # stable?/2), started_at, restart_timer, host_pid, last_exit,
+      # last_exit_at, restart_at}
       pods: %{}
     }
 
@@ -117,6 +144,25 @@ defmodule Tank.Reconciler do
     case find_by_ref(state.pods, ref) do
       nil -> {:noreply, state}
       {name, entry} -> {:noreply, %{state | pods: on_exit(name, entry, reason, state)}}
+    end
+  end
+
+  # A runtime owner event — the reconciler owns every runtime it starts.
+  # Forward a copy to the embedder's :owner (the pre-existing contract),
+  # then act on what it tells us.
+  def handle_info({:tank, name, event}, state) do
+    if state.owner, do: send(state.owner, {:tank, name, event})
+
+    case {event, state.pods[name]} do
+      {{:running, host_pid}, %{status: status} = entry} when status in [:starting, :running] ->
+        entry = %{entry | status: :running, host_pid: host_pid}
+        emit(name, entry)
+        {:noreply, put_in(state.pods[name], entry)}
+
+      _ ->
+        # Terminal events ride the DOWN of the monitored runtime (on_exit);
+        # events for pods we no longer track are stale — ignore both.
+        {:noreply, state}
     end
   end
 
@@ -145,15 +191,29 @@ defmodule Tank.Reconciler do
   end
 
   def handle_call(:running, _from, state) do
-    running = for {name, %{status: :running, pid: pid}} <- state.pods, into: %{}, do: {name, pid}
+    running =
+      for {name, %{status: s, pid: pid}} <- state.pods,
+          s in [:starting, :running] and is_pid(pid),
+          into: %{},
+          do: {name, pid}
+
     {:reply, running, state}
   end
 
   def handle_call(:status, _from, state) do
-    status =
-      Map.new(state.pods, fn {name, e} -> {name, %{status: e.status, retries: e.retries}} end)
-
+    status = Map.new(state.pods, fn {name, e} -> {name, observed(e)} end)
     {:reply, status, state}
+  end
+
+  def handle_call({:restart_pod, name}, _from, state) do
+    case Store.get_pod(name) do
+      {:ok, pod} ->
+        pods = stop_pod(name, state.pods, state)
+        {:reply, :ok, %{state | pods: do_start(pod, 0, pods, state)}}
+
+      {:error, :not_found} ->
+        {:reply, {:error, :not_found}, state}
+    end
   end
 
   # === the pass =============================================================
@@ -171,7 +231,35 @@ defmodule Tank.Reconciler do
     # has left desired state is released, even if its teardown was missed.
     Tank.Net.reconcile(Enum.map(desired, & &1.name))
 
-    %{state | pods: pods}
+    %{state | pods: promote_starting(pods, state)}
+  end
+
+  # Repair for a lost {:running, _} message: an entry still :starting whose
+  # runtime answers host_pid/1 is promoted on the pass — level-triggered,
+  # like everything else here. Runtimes without host_pid/1 (test stubs)
+  # simply stay :starting.
+  defp promote_starting(pods, state) do
+    Map.new(pods, fn
+      {name, %{status: :starting, pid: pid} = entry} when is_pid(pid) ->
+        case safe_host_pid(state.runtime, pid) do
+          {:ok, host_pid} ->
+            entry = %{entry | status: :running, host_pid: host_pid}
+            emit(name, entry)
+            {name, entry}
+
+          _ ->
+            {name, entry}
+        end
+
+      other ->
+        other
+    end)
+  end
+
+  defp safe_host_pid(runtime, pid) do
+    if function_exported?(runtime, :host_pid, 1), do: runtime.host_pid(pid), else: :error
+  catch
+    :exit, _ -> :error
   end
 
   defp tracked_specs(pods), do: Map.new(pods, fn {name, e} -> {name, e.pod} end)
@@ -189,7 +277,7 @@ defmodule Tank.Reconciler do
     if entry.ref, do: Process.demonitor(entry.ref, [:flush])
     if entry.restart_timer, do: Process.cancel_timer(entry.restart_timer)
 
-    if entry.status == :running and is_pid(entry.pid),
+    if entry.status in [:starting, :running] and is_pid(entry.pid),
       do: DynamicSupervisor.terminate_child(state.sup, entry.pid)
 
     true
@@ -199,7 +287,9 @@ defmodule Tank.Reconciler do
     do: Enum.reduce(specs, pods, fn pod, acc -> do_start(pod, 0, acc, state) end)
 
   defp do_start(%Pod{} = pod, retries, pods, state) do
-    runtime_opts = Keyword.merge(state.runtime_opts, owner: state.owner)
+    # The reconciler is the runtime's owner (host_pid + lifecycle attribution);
+    # an embedder-supplied :owner gets copies via the handle_info forward.
+    runtime_opts = Keyword.merge(state.runtime_opts, owner: self())
 
     child =
       Supervisor.child_spec({state.runtime, {pod, runtime_opts}},
@@ -211,14 +301,20 @@ defmodule Tank.Reconciler do
       {:ok, pid} ->
         entry = %{
           pod: pod,
-          status: :running,
+          status: :starting,
           pid: pid,
           ref: Process.monitor(pid),
           retries: retries,
           start_at: now(),
-          restart_timer: nil
+          started_at: DateTime.utc_now(),
+          restart_timer: nil,
+          host_pid: nil,
+          last_exit: nil,
+          last_exit_at: nil,
+          restart_at: nil
         }
 
+        emit(pod.name, entry)
         Map.put(pods, pod.name, entry)
 
       {:error, reason} ->
@@ -231,30 +327,51 @@ defmodule Tank.Reconciler do
   # === crash handling =======================================================
 
   defp on_exit(name, entry, reason, state) do
+    entry = %{entry | last_exit: last_exit(reason), last_exit_at: DateTime.utc_now()}
+
     if restart?(entry.pod, reason) do
       # A run that lasted the stable window resets the backoff to base (2⁰).
       n = if stable?(entry, state), do: 0, else: entry.retries
       delay = min(state.backoff_base * Integer.pow(2, n), state.backoff_cap)
       timer = Process.send_after(self(), {:restart, name}, delay)
 
-      Map.put(state.pods, name, %{
+      entry = %{
         entry
         | status: :backing_off,
           pid: nil,
           ref: nil,
+          host_pid: nil,
           retries: n + 1,
-          restart_timer: timer
-      })
+          restart_timer: timer,
+          restart_at: DateTime.add(DateTime.utc_now(), delay, :millisecond)
+      }
+
+      emit(name, entry, %{restart_in_ms: delay})
+      Map.put(state.pods, name, entry)
     else
-      Map.put(state.pods, name, %{
+      entry = %{
         entry
         | status: :terminal,
           pid: nil,
           ref: nil,
-          restart_timer: nil
-      })
+          host_pid: nil,
+          restart_timer: nil,
+          restart_at: nil
+      }
+
+      emit(name, entry)
+      Map.put(state.pods, name, entry)
     end
   end
+
+  # Map a runtime's stop reason to what the workload actually did. The
+  # :shutdown wrappers are Tank.Runtime's documented expected outcomes;
+  # anything else is a genuine setup/session failure.
+  defp last_exit(:normal), do: {:exited, 0}
+  defp last_exit({:shutdown, {:workload_exited, code}}), do: {:exited, code}
+  defp last_exit({:shutdown, {:workload_signaled, signum}}), do: {:signaled, signum}
+  defp last_exit(:shutdown), do: {:exited, 0}
+  defp last_exit(reason), do: {:error, reason}
 
   defp stable?(%{start_at: start_at}, state),
     do: now() - (start_at || now()) >= state.stable_window
@@ -265,6 +382,38 @@ defmodule Tank.Reconciler do
   defp restart?(%Pod{restart: :never}, _reason), do: false
 
   # === helpers ==============================================================
+
+  # One broadcast per observed transition, on the :pods topic.
+  defp emit(name, entry, extra \\ %{}) do
+    Tank.Events.broadcast(
+      :pods,
+      Map.merge(
+        %{
+          name: name,
+          status: entry.status,
+          at: DateTime.utc_now(),
+          host_pid: entry.host_pid,
+          retries: entry.retries,
+          last_exit: entry.last_exit,
+          restart_in_ms: nil
+        },
+        extra
+      )
+    )
+  end
+
+  # The per-pod observed map handed out by status/1.
+  defp observed(e) do
+    %{
+      status: e.status,
+      retries: e.retries,
+      host_pid: e.host_pid,
+      last_exit: e.last_exit,
+      last_exit_at: e.last_exit_at,
+      started_at: e.started_at,
+      restart_at: e.restart_at
+    }
+  end
 
   defp find_by_ref(pods, ref) do
     Enum.find_value(pods, fn {name, entry} -> if entry.ref == ref, do: {name, entry} end)
