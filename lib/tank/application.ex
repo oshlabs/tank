@@ -23,11 +23,11 @@ defmodule Tank.Application do
     if store_enabled?() do
       store_opts = Application.get_env(:tank, :store, [])
 
-      # The IPAM stack attaches to the store, and the reconciler reads both, so
-      # the order is store → ipam → reconciler. Reconciler options (interval,
-      # backoff, image cache via :runtime_opts) come from config.
+      # The network services attach to the store, and the reconciler reads
+      # both, so the order is store → net → reconciler. Reconciler options
+      # (interval, backoff, image cache via :runtime_opts) come from config.
       [{Tank.Store, store_opts}] ++
-        Tank.Ipam.child_specs(Application.get_env(:tank, :ipam), store_opts) ++
+        Tank.Net.child_specs(Application.get_env(:tank, :net), store_opts) ++
         [{Tank.Reconciler, Application.get_env(:tank, :reconciler, [])}]
     else
       []

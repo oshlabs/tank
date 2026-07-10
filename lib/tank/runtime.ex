@@ -45,7 +45,7 @@ defmodule Tank.Runtime do
   require Logger
 
   alias Linx.Process, as: Workload
-  alias Tank.{Container, Ipam, OCI, Pod}
+  alias Tank.{Container, Net, OCI, Pod}
   alias Tank.Runtime.{Etc, Limits, Network, Rootfs}
 
   # Always-fresh namespaces; :net is added unless the pod shares the host's.
@@ -137,6 +137,8 @@ defmodule Tank.Runtime do
           scratch: nil,
           rootfs: nil,
           etc_files: [],
+          # The pod's network with {:ipam, _} intents resolved (at bring-up).
+          network: nil,
           # The container's resolved run env/cwd, stashed for Tank.exec.
           env: [],
           working_dir: "/"
@@ -166,9 +168,14 @@ defmodule Tank.Runtime do
   def handle_continue(:bring_up, state) do
     scratch = Path.join([state.data_dir, "run", state.pod.name])
 
+    # {:ipam, subnet} NIC intents resolve here, before /etc materialization,
+    # so resolv.conf can carry the pool's DNS; a restarting pod re-allocates
+    # (lease affinity keeps its address). The resolved network is what
+    # Network.setup later actuates.
     with {:ok, rootfs, config} <- resolve_image(state.container, state.image_opts),
          {:ok, run} <- OCI.run_params(state.container, config),
-         etc_files = Etc.materialize(state.pod, scratch),
+         {:ok, network} <- Net.resolve(state.pod),
+         etc_files = Etc.materialize(%{state.pod | network: network}, scratch),
          {:ok, session} <- spawn_workload(state.pod, state.container, run) do
       {:noreply,
        %{
@@ -177,6 +184,7 @@ defmodule Tank.Runtime do
            rootfs: rootfs,
            scratch: scratch,
            etc_files: etc_files,
+           network: network,
            env: run.env,
            working_dir: run.cwd
        }}
@@ -277,13 +285,11 @@ defmodule Tank.Runtime do
   def handle_info({:linx_process, _, _}, state), do: {:noreply, state}
   def handle_info(_msg, state), do: {:noreply, state}
 
-  # Runs in the child's namespaces, host-side, while the workload waits.
-  # {:ipam, subnet} NIC intents resolve to concrete addresses here, just before
-  # actuation, so a restarting pod re-allocates (affinity keeps its address).
+  # Runs in the child's namespaces, host-side, while the workload waits. The
+  # network was already resolved (intents → concrete addresses) at bring-up.
   defp bring_up(state, host_pid) do
     with :ok <- Rootfs.setup(host_pid, state.rootfs, state.etc_files),
-         {:ok, network} <- Ipam.resolve(state.pod),
-         :ok <- Network.setup(host_pid, network),
+         :ok <- Network.setup(host_pid, state.network),
          {:ok, cgroup} <- Limits.apply(state.pod.name, host_pid, state.container.limits) do
       {:ok, cgroup}
     end

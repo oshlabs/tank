@@ -169,7 +169,7 @@ defmodule Tank.Reconciler do
 
     # Level-triggered like the rest of the pass: any IPAM allocation whose pod
     # has left desired state is released, even if its teardown was missed.
-    Tank.Ipam.reconcile(Enum.map(desired, & &1.name))
+    Tank.Net.reconcile(Enum.map(desired, & &1.name))
 
     %{state | pods: pods}
   end

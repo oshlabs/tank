@@ -90,7 +90,7 @@ defmodule Tank.Runtime.NetworkTest do
       )
 
     # The same two steps Tank.Runtime.bring_up runs: resolve, then actuate.
-    assert {:ok, net} = Tank.Ipam.resolve(pod)
+    assert {:ok, net} = Tank.Net.resolve(pod)
     assert [%Tank.Nic{ip: {addr, 29}, gateway: "10.99.1.1"}] = net.nics
 
     {session, host_pid} = spawn_netns()
