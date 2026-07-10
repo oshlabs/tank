@@ -80,6 +80,7 @@ the *refusals* honestly (`{:nic_mode_unsupported, _}`, the `:dhcp` warning).
 |---|---|---|---|
 | multi-container pods | ✅ | runs first container only | PLAN M7 |
 | ~~volumes / mounts~~ | ✅ | **actuated 2026-07-10** — managed dirs under `data_dir/volumes`, host binds, ro sealing; e2e witnesses rw/ro from inside via `/proc/mounts` | done |
+| per-pod rootfs isolation | — | the content-addressed image rootfs is bind-mounted **shared and rw**: writes outside volumes land in the cached rootfs, visible to every pod on the same image (the rootfs e2e exploits this to read its probe back). Volumes are the correct place for state; an overlay/copy-up layer is the fix | future (surfaced 2026-07-10) |
 | log capture | — | stdio → `/dev/null` | PLAN (later) |
 | `:dhcp` NICs | ✅ | warns, leaves NIC bare | wire Starfish's DHCP client |
 | `:bridge` / `:ipvlan` | ✅ modelled | hard error | `docs/networking.md` [modelled] |
