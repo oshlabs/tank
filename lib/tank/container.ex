@@ -14,8 +14,10 @@ defmodule Tank.Container do
     * `limits` — a map of cgroup limits: `:memory` (bytes), `:pids`, `:cpu`
       (`{quota_us, period_us}`).
     * `tty` — when `true`, the container's main process runs on a PTY (rather
-      than `/dev/null`), so `Tank.attach/1` can take over its terminal. Use it
-      for a container that *is* an interactive shell. Default `false`.
+      than captured stdout/stderr streams), so `Tank.attach/1` can take over
+      its terminal; its output reaches the pod log as the merged `:tty`
+      stream. Use it for a container that *is* an interactive shell.
+      Default `false`.
 
   > #### Not the runtime {: .info}
   > This is the *desired-state struct*. The supervised GenServer that brings a

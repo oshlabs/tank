@@ -15,8 +15,13 @@ defmodule Tank.Runtime do
   ## Scope (M4)
 
   One container per pod (sidecars are M7); the workload runs as the image's
-  default user with **no** user namespace; container stdio goes to `/dev/null`
-  (log capture is a later concern). A pod's netns may still hold several NICs.
+  default user with **no** user namespace. Container stdio is captured: a
+  per-pod `Tank.Runtime.Logs` collector receives stdout/stderr over
+  `{:connect_unix, _}` stdio (or the PTY tee for `tty: true`) and writes
+  timestamped, stream-tagged lines under `<log_dir>/<pod>/` — see
+  `Tank.Logs` for the read API and configuration (`config :tank, :logs,
+  enabled: false` restores the old stdio → `/dev/null`). A pod's netns may
+  still hold several NICs.
 
   ## Owner events
 
@@ -46,7 +51,7 @@ defmodule Tank.Runtime do
 
   alias Linx.Process, as: Workload
   alias Tank.{Container, Net, OCI, Pod}
-  alias Tank.Runtime.{Etc, Limits, Network, Rootfs, Volumes}
+  alias Tank.Runtime.{Etc, Limits, Logs, Network, Rootfs, Volumes}
 
   # Always-fresh namespaces; :net is added unless the pod shares the host's.
   @base_namespaces [:mount, :pid, :uts, :ipc]
@@ -141,6 +146,8 @@ defmodule Tank.Runtime do
           volume_mounts: [],
           # The pod's network with {:ipam, _} intents resolved (at bring-up).
           network: nil,
+          # The per-pod log collector (Tank.Runtime.Logs); nil when disabled.
+          logs: nil,
           # The container's resolved run env/cwd, stashed for Tank.exec.
           env: [],
           working_dir: "/"
@@ -179,7 +186,11 @@ defmodule Tank.Runtime do
          {:ok, network} <- Net.resolve(state.pod),
          {:ok, volume_mounts} <- Volumes.resolve(state.pod, state.container, state.data_dir),
          etc_files = Etc.materialize(%{state.pod | network: network}, scratch),
-         {:ok, session} <- spawn_workload(state.pod, state.container, run) do
+         # The collector's listeners must exist before the workload spawns:
+         # linx connects the {:connect_unix, _} stdio host-side at spawn time.
+         {:ok, logs} <-
+           Logs.maybe_start(state.pod.name, state.container.name, scratch, state.data_dir),
+         {:ok, session} <- spawn_workload(state.pod, state.container, run, logs) do
       {:noreply,
        %{
          state
@@ -189,6 +200,7 @@ defmodule Tank.Runtime do
            etc_files: etc_files,
            volume_mounts: volume_mounts,
            network: network,
+           logs: logs,
            env: run.env,
            working_dir: run.cwd
        }}
@@ -206,18 +218,25 @@ defmodule Tank.Runtime do
     end
   end
 
-  defp spawn_workload(%Pod{} = pod, %Container{} = container, run) do
+  defp spawn_workload(%Pod{} = pod, %Container{} = container, run, logs) do
     Workload.spawn(
       argv: run.argv,
       env: tty_env(run.env, container.tty),
       cwd: run.cwd,
       namespaces: namespaces(pod.network),
       owner: self(),
-      # A `tty: true` container's main process runs on a PTY so Tank.attach can
-      # take it over; otherwise its stdio is discarded (log capture is later).
-      stdio: if(container.tty, do: :pty, else: :devnull)
+      stdio: stdio(container, logs)
     )
   end
+
+  # A `tty: true` container's main process runs on a PTY so Tank.attach can
+  # take it over (its output reaches the log via the :pty_out tee below).
+  # Otherwise stdout/stderr go to the collector's AF_UNIX listeners — linx
+  # connects them host-side at spawn time — and stdin to /dev/null. With
+  # capture disabled, all stdio is discarded as before.
+  defp stdio(%Container{tty: true}, _logs), do: :pty
+  defp stdio(%Container{}, nil), do: :devnull
+  defp stdio(%Container{}, logs), do: Logs.stdio(logs)
 
   # A `tty: true` container's main process is interactive, so give it a default
   # `TERM` (unless the image set one) — without it readline features like Ctrl-L
@@ -284,7 +303,16 @@ defmodule Tank.Runtime do
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
-  # Lifecycle chatter we don't act on (PTY output, etc.).
+  # A tty container's merged PTY output, teed into the log. Only flows here
+  # while the runtime owns the session — during an attach the attacher owns
+  # it, so interactive bytes bypass the log (documented in Tank.Logs).
+  def handle_info({:linx_process, :pty_out, bytes}, %{logs: logs} = state)
+      when is_pid(logs) do
+    Logs.pty_out(logs, bytes)
+    {:noreply, state}
+  end
+
+  # Lifecycle chatter we don't act on.
   def handle_info({:linx_process, _}, state), do: {:noreply, state}
   def handle_info({:linx_process, _, _}, state), do: {:noreply, state}
   def handle_info(_msg, state), do: {:noreply, state}
@@ -370,6 +398,10 @@ defmodule Tank.Runtime do
   def terminate(_reason, state) do
     if is_pid(state.session) and Process.alive?(state.session),
       do: GenServer.stop(state.session, :normal)
+
+    # After the workload: the collector drains what the workload wrote last,
+    # then its scratch-dir sockets can be wiped with the scratch below.
+    Logs.stop(state.logs)
 
     Limits.remove(state.cgroup)
     if state.scratch, do: File.rm_rf(state.scratch)

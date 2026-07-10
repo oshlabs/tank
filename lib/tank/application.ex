@@ -20,17 +20,22 @@ defmodule Tank.Application do
   end
 
   defp children do
+    # The log-subscription registry runs even with the store disabled:
+    # standalone runtimes (tests, embedders driving Tank.Runtime directly)
+    # still capture and broadcast logs.
+    logs_registry = {Registry, keys: :duplicate, name: Tank.Logs.registry()}
+
     if store_enabled?() do
       store_opts = Application.get_env(:tank, :store, [])
 
       # The network services attach to the store, and the reconciler reads
       # both, so the order is store → net → reconciler. Reconciler options
       # (interval, backoff, image cache via :runtime_opts) come from config.
-      [{Tank.Store, store_opts}] ++
+      [logs_registry, {Tank.Store, store_opts}] ++
         Tank.Net.child_specs(Application.get_env(:tank, :net), store_opts) ++
         [{Tank.Reconciler, Application.get_env(:tank, :reconciler, [])}]
     else
-      []
+      [logs_registry]
     end
   end
 

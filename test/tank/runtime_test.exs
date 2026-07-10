@@ -156,6 +156,59 @@ defmodule Tank.RuntimeTest do
     GenServer.stop(runtime)
   end
 
+  describe "log capture" do
+    test "a non-tty workload's stdout lands in the pod log, live and on disk", %{deck: deck} do
+      data_dir = Path.join(System.tmp_dir!(), "tank-logs-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf!(data_dir) end)
+      Process.flag(:trap_exit, true)
+
+      :ok = Tank.Logs.subscribe("rt-logs")
+
+      # /bin/uname runs to completion printing kernel info on stdout — the
+      # bytes travel workload → connect_unix socket → collector.
+      p = deck_pod("rt-logs", deck, %{command: ["/bin/uname"]}, %{restart: :never})
+
+      {:ok, runtime} =
+        Runtime.start_link(p, owner: self(), image: deck.image_opts, data_dir: data_dir)
+
+      ref = Process.monitor(runtime)
+
+      # Live: the subscriber sees the line as it is captured.
+      assert_receive {:tank_logs, "rt-logs", %{container: "app", stream: :out, line: line}},
+                     15_000
+
+      assert line =~ "Linux"
+
+      assert_receive {:DOWN, ^ref, :process, ^runtime, :normal}, 15_000
+
+      # At rest: the same line parses back out of the pod's log file, which
+      # survives the runtime (scratch is wiped; the log dir is not).
+      {:ok, entries} = Tank.logs("rt-logs", dir: Path.join(data_dir, "logs"))
+      assert Enum.any?(entries, &(&1.stream == :out and &1.line =~ "Linux"))
+      refute File.dir?(Path.join([data_dir, "run", "rt-logs"]))
+    end
+
+    test "a tty workload's PTY output is teed into the log as :tty", %{deck: deck} do
+      data_dir = Path.join(System.tmp_dir!(), "tank-logs-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm_rf!(data_dir) end)
+      Process.flag(:trap_exit, true)
+
+      :ok = Tank.Logs.subscribe("rt-logs-tty")
+
+      p = deck_pod("rt-logs-tty", deck, %{command: ["/bin/uname"], tty: true}, %{restart: :never})
+
+      {:ok, runtime} =
+        Runtime.start_link(p, owner: self(), image: deck.image_opts, data_dir: data_dir)
+
+      ref = Process.monitor(runtime)
+
+      assert_receive {:tank_logs, "rt-logs-tty", %{stream: :tty, line: line}}, 15_000
+      assert line =~ "Linux"
+
+      assert_receive {:DOWN, ^ref, :process, ^runtime, :normal}, 15_000
+    end
+  end
+
   describe "attach handoff (tty: true)" do
     test "begin_attach hands off the main PTY; detach leaves the workload running", %{deck: deck} do
       # The cat applet with no PATH echoes stdin: interactive, stays alive on

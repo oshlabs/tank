@@ -4,6 +4,23 @@ All notable changes to Tank are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Container log capture.** A non-tty container's stdout/stderr no longer
+  vanish into `/dev/null`: a per-pod collector (`Tank.Runtime.Logs`) receives
+  them over AF_UNIX `{:connect_unix, _}` stdio — linx connects the sockets
+  host-side at spawn time, so nothing socket-shaped ever appears inside the
+  container's rootfs — and a `tty: true` container's merged PTY output is teed
+  in as the `:tty` stream. Lines are timestamped, stream-tagged, written to
+  `<log_dir>/<pod>/<container>.log` with size-based rotation, and broadcast
+  live. New API: `Tank.logs/2` (tail, parsed entries) and
+  `Tank.Logs.subscribe/1` / `unsubscribe/1` (live `{:tank_logs, pod, entry}`
+  messages). Configuration under `config :tank, :logs` (`dir`,
+  `max_file_bytes`, `max_files`, `enabled` — set `enabled: false` for the old
+  behaviour). Requires linx newer than 0.2.0 (host-side `connect_unix`).
+
 ## [0.2.0] - 2026-06-06
 
 ### Changed

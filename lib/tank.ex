@@ -67,6 +67,17 @@ defmodule Tank do
   def list, do: Store.list_pods()
 
   @doc """
+  The last captured log entries for a pod, oldest first (`tail: 200` by
+  default) — see `Tank.Logs` for the entry shape, live following via
+  `Tank.Logs.subscribe/1`, and capture configuration.
+
+      Tank.logs("web")
+      Tank.logs("web", tail: 50)
+  """
+  @spec logs(String.t(), keyword()) :: {:ok, [Tank.Logs.entry()]}
+  def logs(pod, opts \\ []), do: Tank.Logs.tail(pod, opts)
+
+  @doc """
   Run an interactive command *inside* a running pod — `docker exec -it`.
 
   Resolves the pod's running workload, starts a **second** process that enters
