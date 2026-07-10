@@ -66,6 +66,43 @@ defmodule Tank.Runtime.NetworkTest do
     Linx.Process.abort(session)
   end
 
+  test "an {:ipam, subnet} intent resolves through the embedded IPAM onto a real interface" do
+    table = :"ipam_e2e_#{System.unique_integer([:positive])}"
+    start_supervised!({Starfish.Store.Memory, name: table})
+
+    start_supervised!(
+      {Starfish.IPAM.Server,
+       store: {Starfish.Store.Memory, table},
+       sweep_interval: 0,
+       desired: %{
+         prefixes: [%{subnet: "10.99.1.0/29", gateway: "10.99.1.1"}],
+         reservations: []
+       }}
+    )
+
+    pod =
+      Tank.Pod.new!(
+        name: "ipam-e2e",
+        containers: [%{name: "main", image: "unused"}],
+        network: %{
+          nics: [%{name: "eth0", parent: @parent, ip: {:ipam, "10.99.1.0/29"}}]
+        }
+      )
+
+    # The same two steps Tank.Runtime.bring_up runs: resolve, then actuate.
+    assert {:ok, net} = Tank.Ipam.resolve(pod)
+    assert [%Tank.Nic{ip: {addr, 29}, gateway: "10.99.1.1"}] = net.nics
+
+    {session, host_pid} = spawn_netns()
+    assert :ok = Net.setup(host_pid, net)
+
+    assert "eth0" in links_in_netns(host_pid)
+    {:ok, expected} = Linx.IP.parse(addr)
+    assert expected in addresses_in_netns(host_pid, "eth0")
+
+    Linx.Process.abort(session)
+  end
+
   test "the macvlan does NOT leak into the host netns" do
     {session, host_pid} = spawn_netns()
 
