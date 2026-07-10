@@ -64,3 +64,4 @@ This is `tank`, a declarative container orchestrator for the BEAM, built on Linx
 
   - To synchronize before the next call, use `_ = :sys.get_state(pid)`.
 - Tests needing real namespaces, mounts, or netlink need root — run them via `./sudotest.sh`, tagged `@tag :integration`. Khepri-backed tests start a throwaway store per test with a unique name.
+- The suite is hermetic: no test reaches Docker Hub. Registry mechanics run against a local `Stevedore.Testing` registry serving the deckhand image; the two tests that need a real userland seed alpine/debian from ECR's mirror once (cold cache only). Architecture, coverage map, and the spec-vs-actuation gap table: `docs/testing.md`.
