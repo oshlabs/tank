@@ -157,6 +157,20 @@ defmodule Tank do
   def logs(pod, opts \\ []), do: Tank.Logs.tail(pod, opts)
 
   @doc """
+  A pod's runtime statistics. Without options: the newest sample. With
+  `window: ms`: oldest-first history over that window (raw or coarse
+  resolution, picked automatically) — see `Tank.Stats`.
+
+      Tank.stats("web")
+      Tank.stats("web", window: :timer.minutes(5))
+  """
+  @spec stats(String.t()) :: {:ok, Tank.Stats.sample()} | {:error, :not_found}
+  def stats(pod), do: Tank.Stats.current(pod)
+
+  @spec stats(String.t(), keyword()) :: [Tank.Stats.sample()]
+  def stats(pod, opts), do: Tank.Stats.history(pod, opts)
+
+  @doc """
   Run an interactive command *inside* a running pod — `docker exec -it`.
 
   Resolves the pod's running workload, starts a **second** process that enters

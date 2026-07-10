@@ -37,6 +37,7 @@ defmodule Tank.Application do
       [logs_registry, events_registry, {Tank.Store, store_opts}] ++
         Tank.Net.child_specs(Application.get_env(:tank, :net), store_opts) ++
         [{Tank.Reconciler, Application.get_env(:tank, :reconciler, [])}] ++
+        stats_children() ++
         web_children()
     else
       [logs_registry, events_registry] ++ web_children()
@@ -46,6 +47,12 @@ defmodule Tank.Application do
   # Consumers (and the test suite) that manage the store themselves set
   # `config :tank, start_store?: false`.
   defp store_enabled?, do: Application.get_env(:tank, :start_store?, true)
+
+  # The stats sampler polls the reconciler, so it rides the store branch and
+  # starts after it. `config :tank, :stats, enabled: false` opts out.
+  defp stats_children do
+    if Tank.Stats.config().enabled?, do: [Tank.Stats], else: []
+  end
 
   # The admin UI is opt-in (`config :tank, :web, enabled: true` — dev.exs, or
   # TANK_WEB=1 via runtime.exs). Absent → headless: no Phoenix process starts.

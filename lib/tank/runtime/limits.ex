@@ -2,8 +2,12 @@ defmodule Tank.Runtime.Limits do
   @moduledoc false
 
   # Applies a container's cgroup v2 resource limits (memory / pids / cpu) at the
-  # checkpoint and tears the cgroup down on exit. No limits => no cgroup created.
-  # Per-container cgroups live under /sys/fs/cgroup/tank/<name>.
+  # checkpoint and tears the cgroup down on exit. Per-container cgroups live
+  # under /sys/fs/cgroup/tank/<name>, and one is created for EVERY pod — not
+  # just limited ones — so Tank.Stats can read cpu/memory/pids accounting
+  # regardless of limits. A no-limits pod whose cgroup can't be created
+  # (exotic cgroup setups) soft-fails to {:ok, nil}: it runs unaccounted,
+  # exactly as it did before stats existed.
 
   alias Linx.Cgroup
 
@@ -14,15 +18,32 @@ defmodule Tank.Runtime.Limits do
   `{:ok, cgroup_path | nil}` (nil when there are no limits).
   """
   @spec apply(String.t(), pos_integer(), map()) :: {:ok, Path.t() | nil} | {:error, term()}
-  def apply(_name, _pid, limits) when map_size(limits) == 0, do: {:ok, nil}
-
   def apply(name, pid, limits) do
-    with {:ok, _} <- Cgroup.create(@root),
-         :ok <- enable(@root, controllers(limits)),
-         {:ok, cgroup} <- Cgroup.create(Path.join(@root, name)),
-         :ok <- set(cgroup, limits),
-         :ok <- Cgroup.add_process(cgroup, pid) do
-      {:ok, cgroup}
+    result =
+      with {:ok, _} <- Cgroup.create(@root),
+           :ok <- enable(@root, controllers(limits)),
+           {:ok, cgroup} <- Cgroup.create(Path.join(@root, name)),
+           :ok <- set(cgroup, limits),
+           :ok <- Cgroup.add_process(cgroup, pid) do
+        {:ok, cgroup}
+      end
+
+    case {result, map_size(limits)} do
+      {{:ok, _} = ok, _} ->
+        ok
+
+      {{:error, reason}, 0} ->
+        require Logger
+
+        Logger.warning(
+          "Tank.Runtime.Limits[#{name}]: no stats cgroup (#{inspect(reason)}); " <>
+            "the pod runs unaccounted"
+        )
+
+        {:ok, nil}
+
+      {{:error, _} = err, _} ->
+        err
     end
   end
 
@@ -50,7 +71,10 @@ defmodule Tank.Runtime.Limits do
     end
   end
 
-  defp controllers(limits), do: limits |> Map.keys() |> Enum.map(&controller/1) |> Enum.uniq()
+  # cpu/memory/pids are always enabled (their .stat/.current files are what
+  # Tank.Stats reads); limits can only name the same three today.
+  defp controllers(limits),
+    do: Enum.uniq([:cpu, :memory, :pids] ++ Enum.map(Map.keys(limits), &controller/1))
 
   defp controller(:memory), do: :memory
   defp controller(:pids), do: :pids
