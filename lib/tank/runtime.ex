@@ -102,9 +102,12 @@ defmodule Tank.Runtime do
 
   `{:error, :not_running}` if the workload isn't up yet; `{:error, :not_a_tty}`
   if the container wasn't started with `tty: true` (there is no PTY to attach
-  to). Pair every success with `end_attach/1`.
+  to); `{:error, :attached}` if another attacher already holds the session.
+  Pair every success with `end_attach/1` (the attacher is also monitored — a
+  vanished attacher auto-detaches).
   """
-  @spec begin_attach(pid(), pid()) :: {:ok, pid()} | {:error, :not_running | :not_a_tty}
+  @spec begin_attach(pid(), pid()) ::
+          {:ok, pid()} | {:error, :not_running | :not_a_tty | :attached}
   def begin_attach(runtime, attacher), do: GenServer.call(runtime, {:begin_attach, attacher})
 
   @doc """
@@ -119,6 +122,13 @@ defmodule Tank.Runtime do
   catch
     :exit, _ -> :ok
   end
+
+  @doc false
+  # Feed PTY bytes into this runtime's log collector — used by
+  # Tank.Console.Session during a web attach, when the console (not the
+  # runtime) owns the session and the runtime's own :pty_out tee is silent.
+  @spec tee_pty(pid(), binary()) :: :ok
+  def tee_pty(runtime, bytes), do: GenServer.cast(runtime, {:tee_pty, bytes})
 
   # === lifecycle ============================================================
 
@@ -149,6 +159,9 @@ defmodule Tank.Runtime do
           network: nil,
           # The per-pod log collector (Tank.Runtime.Logs); nil when disabled.
           logs: nil,
+          # The current attacher (begin_attach/2), monitored; nil = unattached.
+          attacher: nil,
+          attacher_ref: nil,
           # The container's resolved run env/cwd, stashed for Tank.exec.
           env: [],
           working_dir: "/"
@@ -295,6 +308,21 @@ defmodule Tank.Runtime do
     {:stop, {:workload_error, errno, stage}, state}
   end
 
+  # The attacher vanished without end_attach (a died LiveView/console):
+  # auto-detach — reclaim ownership and re-derive, exactly like end_attach.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{attacher_ref: ref} = state) do
+    state = clear_attacher(state)
+
+    if is_pid(state.session) do
+      case reclaim(state) do
+        {:ok, state} -> {:noreply, state}
+        {:stop, reason, state} -> {:stop, reason, state}
+      end
+    else
+      {:noreply, state}
+    end
+  end
+
   # The workload session is linked; with trap_exit on, its unexpected death
   # arrives here (it normally lingers post-exit, so this means it crashed).
   def handle_info({:EXIT, session, reason}, %{session: session} = state) do
@@ -341,12 +369,19 @@ defmodule Tank.Runtime do
   def handle_call(:exec_context, _from, %{host_pid: pid} = state),
     do: {:reply, {:ok, %{host_pid: pid, env: state.env, working_dir: state.working_dir}}, state}
 
+  def handle_call({:begin_attach, _attacher}, _from, %{attacher: current} = state)
+      when is_pid(current) do
+    {:reply, {:error, :attached}, state}
+  end
+
   def handle_call({:begin_attach, attacher}, _from, %{session: session, host_pid: pid} = state)
       when is_pid(session) and is_integer(pid) do
     case Workload.pty_master(session) do
       {:ok, _} ->
         :ok = Workload.set_owner(session, attacher)
-        {:reply, {:ok, session}, state}
+
+        {:reply, {:ok, session},
+         %{state | attacher: attacher, attacher_ref: Process.monitor(attacher)}}
 
       {:error, :no_pty} ->
         {:reply, {:error, :not_a_tty}, state}
@@ -361,6 +396,27 @@ defmodule Tank.Runtime do
   # the lifecycle message, so we act on it now exactly as the handle_info
   # clauses would.
   def handle_call(:end_attach, _from, %{session: session} = state) when is_pid(session) do
+    state = clear_attacher(state)
+
+    case reclaim(state) do
+      {:ok, state} -> {:reply, :ok, state}
+      {:stop, reason, state} -> {:stop, reason, :ok, state}
+    end
+  end
+
+  def handle_call(:end_attach, _from, state), do: {:reply, :ok, clear_attacher(state)}
+
+  # Console attach tees the bytes it owns back into the pod's log.
+  @impl true
+  def handle_cast({:tee_pty, bytes}, state) do
+    if is_pid(state.logs), do: Logs.pty_out(state.logs, bytes)
+    {:noreply, state}
+  end
+
+  # Take ownership of the session back and re-derive the workload's state: if
+  # it terminated while attached, the runtime never saw the lifecycle message,
+  # so it acts on it now exactly as the handle_info clauses would.
+  defp reclaim(%{session: session} = state) do
     :ok = Workload.set_owner(session, self())
 
     case Workload.info(session) do
@@ -369,30 +425,33 @@ defmodule Tank.Runtime do
         reclaim_terminal(result, state)
 
       _ ->
-        {:reply, :ok, state}
+        {:ok, state}
     end
   end
 
-  def handle_call(:end_attach, _from, state), do: {:reply, :ok, state}
+  defp clear_attacher(%{attacher_ref: ref} = state) do
+    if ref, do: Process.demonitor(ref, [:flush])
+    %{state | attacher: nil, attacher_ref: nil}
+  end
 
   defp reclaim_terminal({:exited, 0}, state) do
     notify(state, {:exited, 0})
-    {:stop, :normal, :ok, state}
+    {:stop, :normal, state}
   end
 
   defp reclaim_terminal({:exited, code}, state) do
     notify(state, {:exited, code})
-    {:stop, {:shutdown, {:workload_exited, code}}, :ok, state}
+    {:stop, {:shutdown, {:workload_exited, code}}, state}
   end
 
   defp reclaim_terminal({:signaled, signum}, state) do
     notify(state, {:signaled, signum})
-    {:stop, {:shutdown, {:workload_signaled, signum}}, :ok, state}
+    {:stop, {:shutdown, {:workload_signaled, signum}}, state}
   end
 
   defp reclaim_terminal(other, state) do
     notify(state, {:error, other})
-    {:stop, {:workload_terminated, other}, :ok, state}
+    {:stop, {:workload_terminated, other}, state}
   end
 
   @impl true

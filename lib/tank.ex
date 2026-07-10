@@ -208,8 +208,9 @@ defmodule Tank do
           | {:error, term()}
   def exec(pod_name, argv, opts \\ [])
       when is_binary(pod_name) and is_list(argv) and argv != [] do
-    with {:ok, ctx} <- resolve_exec_context(pod_name),
-         {:ok, session} <- Linx.Process.enter(ctx.host_pid, enter_opts(ctx, argv, opts)) do
+    with {:ok, ctx} <- Tank.Console.resolve_exec_context(pod_name),
+         {:ok, session} <-
+           Linx.Process.enter(ctx.host_pid, Tank.Console.enter_opts(ctx, argv, opts)) do
       tty_attach(session)
     end
   end
@@ -229,40 +230,6 @@ defmodule Tank do
     end
   end
 
-  # Resolve a pod name to its container's exec context (host pid + env + cwd)
-  # via the reconciler's view of what's running and the owning Tank.Runtime.
-  defp resolve_exec_context(pod_name) do
-    case Map.fetch(Reconciler.running(), pod_name) do
-      {:ok, runtime} -> Runtime.exec_context(runtime)
-      :error -> {:error, :not_running}
-    end
-  end
-
-  defp enter_opts(ctx, argv, opts) do
-    [
-      argv: argv,
-      stdio: :pty,
-      auto_proceed: true,
-      cwd: Keyword.get(opts, :cwd, ctx.working_dir),
-      env: exec_env(ctx.env, Keyword.get(opts, :env, []))
-    ]
-  end
-
-  # The container's env, a default TERM when it set none (for a usable shell),
-  # then the caller's :env overrides merged on top -- last writer per key wins.
-  defp exec_env(container_env, overrides) do
-    has_term? = Enum.any?(container_env, &String.starts_with?(&1, "TERM="))
-    base = if has_term?, do: container_env, else: ["TERM=xterm" | container_env]
-    merge_env(base, overrides)
-  end
-
-  defp merge_env(base, overrides) do
-    over_keys = MapSet.new(overrides, &env_key/1)
-    Enum.reject(base, &MapSet.member?(over_keys, env_key(&1))) ++ overrides
-  end
-
-  defp env_key(kv), do: kv |> String.split("=", parts: 2) |> hd()
-
   @doc """
   Attach to a `tty: true` pod's main process — `docker attach`.
 
@@ -271,7 +238,8 @@ defmodule Tank do
   program (declare its container with `tty: true`). Because ending that program
   stops the container, leave without killing it by pressing the detach sequence
   — `Ctrl-P` `Ctrl-Q` — which returns `{:ok, :detached}` with the pod still
-  running, ready to re-attach.
+  running, ready to re-attach. One attacher at a time: a second attach gets
+  `{:error, :attached}`.
 
       Tank.apply(%{
         name: "console",

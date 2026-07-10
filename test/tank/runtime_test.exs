@@ -46,14 +46,23 @@ defmodule Tank.RuntimeTest do
     refute File.dir?(cgroup)
   end
 
-  test "a pod with no limits needs no cgroup", %{deck: deck} do
+  test "a pod with no limits still gets an accounting cgroup (no limits set)", %{deck: deck} do
+    # Tank.Stats reads cpu/memory/pids from the pod's cgroup, so one exists
+    # for every pod; without limits the limit files stay at their defaults.
     p = deck_pod("rt-nolimits", deck)
     {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
 
-    assert_receive {:tank, _, {:running, _host_pid}}, 15_000
-    refute File.dir?("/sys/fs/cgroup/tank/rt-nolimits")
+    assert_receive {:tank, _, {:running, host_pid}}, 15_000
 
+    cgroup = "/sys/fs/cgroup/tank/rt-nolimits"
+    assert File.dir?(cgroup)
+    assert File.read!(Path.join(cgroup, "memory.max")) |> String.trim() == "max"
+    procs = File.read!(Path.join(cgroup, "cgroup.procs")) |> String.split()
+    assert Integer.to_string(host_pid) in procs
+
+    # Teardown still removes it.
     GenServer.stop(runtime)
+    refute File.dir?(cgroup)
   end
 
   test "a workload killed by a signal stops under a :shutdown reason", %{deck: deck} do

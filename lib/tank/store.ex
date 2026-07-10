@@ -150,6 +150,44 @@ defmodule Tank.Store do
     |> Enum.map(fn {_name, pod} -> pod end)
   end
 
+  # === namespaced access for sibling seams ==================================
+
+  # Generic path CRUD for OTHER subtrees of the shared store — the web layer's
+  # `Tank.Store.Web` ([:tank_web]) is the consumer. Deliberately @doc false
+  # and root-prefixed by the caller module: nothing outside this file and its
+  # named seams touches [:tank, :pods] except the pod CRUD above.
+
+  @doc false
+  def put_at(path, value) when is_list(path), do: normalize(:khepri.put(store_id(), path, value))
+
+  @doc false
+  def get_at(path) when is_list(path) do
+    case :khepri.get(store_id(), path) do
+      {:ok, :undefined} -> {:error, :not_found}
+      {:ok, value} -> {:ok, value}
+      _ -> {:error, :not_found}
+    end
+  end
+
+  @doc false
+  def delete_at(path) when is_list(path), do: normalize(:khepri.delete(store_id(), path))
+
+  @doc false
+  # Direct children of `path` as `{leaf_name, value}` (valueless tree nodes
+  # are skipped).
+  def children_at(path) when is_list(path) do
+    case :khepri.get_many(store_id(), path ++ [@wildcard]) do
+      {:ok, children} ->
+        {:ok,
+         for {child_path, value} <- children, value != :undefined do
+           {List.last(child_path), value}
+         end}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   # === internals ===========================================================
 
   defp path(name), do: @pods_root ++ [name]

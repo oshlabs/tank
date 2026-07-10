@@ -25,6 +25,7 @@ defmodule Tank.Application do
     # capture logs and broadcast events.
     logs_registry = {Registry, keys: :duplicate, name: Tank.Logs.registry()}
     events_registry = {Registry, keys: :duplicate, name: Tank.Events.registry()}
+    console_sup = {DynamicSupervisor, name: Tank.Console.Supervisor, strategy: :one_for_one}
 
     if store_enabled?() do
       store_opts = Application.get_env(:tank, :store, [])
@@ -34,13 +35,13 @@ defmodule Tank.Application do
       # (interval, backoff, image cache via :runtime_opts) come from config.
       # The web face (when enabled) starts last: the domain is ready at the
       # first request.
-      [logs_registry, events_registry, {Tank.Store, store_opts}] ++
+      [logs_registry, events_registry, console_sup, {Tank.Store, store_opts}] ++
         Tank.Net.child_specs(Application.get_env(:tank, :net), store_opts) ++
         [{Tank.Reconciler, Application.get_env(:tank, :reconciler, [])}] ++
         stats_children() ++
         web_children()
     else
-      [logs_registry, events_registry] ++ web_children()
+      [logs_registry, events_registry, console_sup] ++ web_children()
     end
   end
 
