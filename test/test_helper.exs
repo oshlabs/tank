@@ -2,6 +2,8 @@
 # root. They are tagged :integration and excluded by default; run them with
 # `sudo mix test --include integration` (see ./sudotest.sh).
 #
-# :network tests reach a real image registry (Docker Hub); they are also
-# excluded by default — run with `mix test --include network`.
-ExUnit.start(exclude: [:integration, :network])
+# No test reaches Docker Hub. Registry mechanics run against a hermetic local
+# registry (Stevedore.Testing); the root e2e suites use real distro images
+# from a persistent cache, seeded once from ECR's public mirror when cold
+# (Tank.TestImages) — a warm run touches no network at all.
+ExUnit.start(exclude: [:integration])

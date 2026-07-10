@@ -13,10 +13,8 @@ defmodule Tank.AttachFlagshipTest do
   alias Linx.Process, as: Workload
   alias Tank.{Pod, Runtime}
 
-  @cache Path.join(System.tmp_dir!(), "tank-image-cache")
-
   setup_all do
-    {:ok, _} = Tank.Image.pull("debian:13", cache: @cache)
+    {_ref, _} = Tank.TestImages.debian!()
     :ok
   end
 
@@ -26,10 +24,12 @@ defmodule Tank.AttachFlagshipTest do
         name: "flagship",
         network: :none,
         restart: :always,
-        containers: [%{name: "sh", image: "debian:13", command: ["/bin/bash"], tty: true}]
+        containers: [
+          %{name: "sh", image: Tank.TestImages.debian_ref(), command: ["/bin/bash"], tty: true}
+        ]
       })
 
-    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
     assert_receive {:tank, :running, _host_pid}, 30_000
 
     # Take over the main bash's terminal (what Tank.attach/1 does internally).

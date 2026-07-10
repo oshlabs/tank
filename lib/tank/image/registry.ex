@@ -49,7 +49,7 @@ defmodule Tank.Image.Registry do
   @spec manifest(String.t(), String.t(), String.t(), token_cache()) ::
           {:ok, info(), token_cache()} | {:error, term}
   def manifest(registry, repo, reference, token_cache \\ nil) do
-    case OCI.manifest(ref(registry, repo, reference), cache_opts(token_cache)) do
+    case OCI.manifest(ref(registry, repo, reference), client_opts(registry, token_cache)) do
       {:ok, %{media_type: mt, digest: digest, raw: raw, json: json}} ->
         {:ok, %{media_type: mt, digest: to_string(digest), raw: raw, json: json}, token_cache}
 
@@ -68,7 +68,7 @@ defmodule Tank.Image.Registry do
   @spec blob(String.t(), String.t(), String.t(), token_cache()) :: {:ok, binary} | {:error, term}
   def blob(registry, repo, digest, token_cache \\ nil) do
     with {:ok, d} <- Digest.parse(digest),
-         {:ok, bytes} <- OCI.blob(ref(registry, repo, nil), d, cache_opts(token_cache)) do
+         {:ok, bytes} <- OCI.blob(ref(registry, repo, nil), d, client_opts(registry, token_cache)) do
       {:ok, bytes}
     else
       {:error, %Error{} = error} -> {:error, translate(error, :blob)}
@@ -78,9 +78,20 @@ defmodule Tank.Image.Registry do
 
   # --- helpers --------------------------------------------------------------
 
-  # Pass the pull's token cache to Stevedore when present; omit it otherwise.
-  defp cache_opts(nil), do: []
-  defp cache_opts(cache), do: [token_cache: cache]
+  # Pass the pull's token cache to Stevedore when present, and follow Docker's
+  # convention for the scheme: a localhost registry speaks plain HTTP (dev
+  # registries, the test suite's hermetic registry); everything else HTTPS.
+  defp client_opts(registry, token_cache) do
+    scheme = if local?(registry), do: [scheme: "http"], else: []
+    cache = if token_cache, do: [token_cache: token_cache], else: []
+    scheme ++ cache
+  end
+
+  defp local?(registry) do
+    registry in ["localhost", "127.0.0.1"] or
+      String.starts_with?(registry, "localhost:") or
+      String.starts_with?(registry, "127.0.0.1:")
+  end
 
   # Build a Stevedore.Reference from Tank's already-normalized parts. The Docker
   # Hub default and `library/` prefix are applied upstream in

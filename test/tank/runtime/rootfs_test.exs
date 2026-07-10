@@ -7,10 +7,8 @@ defmodule Tank.Runtime.RootfsTest do
 
   alias Tank.Runtime.Rootfs
 
-  @cache Path.join(System.tmp_dir!(), "tank-image-cache")
-
   setup_all do
-    {:ok, %{rootfs: rootfs}} = Tank.Image.pull("alpine:latest", cache: @cache)
+    {_ref, %{rootfs: rootfs}} = Tank.TestImages.alpine!()
     {:ok, rootfs: rootfs}
   end
 

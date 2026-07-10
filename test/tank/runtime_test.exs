@@ -10,16 +10,15 @@ defmodule Tank.RuntimeTest do
 
   alias Tank.{Pod, Runtime}
 
-  @cache Path.join(System.tmp_dir!(), "tank-image-cache")
 
   setup_all do
     # Warm the image cache so per-test bring-up is fast.
-    {:ok, _} = Tank.Image.pull("alpine:latest", cache: @cache)
+    {_ref, _} = Tank.TestImages.alpine!()
     :ok
   end
 
   defp pod(name, container_attrs, pod_attrs \\ %{}) do
-    container = Map.merge(%{name: "app", image: "alpine:latest"}, container_attrs)
+    container = Map.merge(%{name: "app", image: Tank.TestImages.alpine_ref()}, container_attrs)
 
     Pod.new!(Map.merge(%{name: name, network: :none, containers: [container]}, pod_attrs))
   end
@@ -31,7 +30,7 @@ defmodule Tank.RuntimeTest do
         limits: %{memory: 64 <<< 20, pids: 50}
       })
 
-    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
 
     assert_receive {:tank, :running, host_pid}, 15_000
     assert {:ok, ^host_pid} = Runtime.host_pid(runtime)
@@ -50,7 +49,7 @@ defmodule Tank.RuntimeTest do
 
   test "a pod with no limits needs no cgroup" do
     p = pod("rt-nolimits", %{command: ["/bin/sleep", "10"]})
-    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
 
     assert_receive {:tank, :running, _host_pid}, 15_000
     refute File.dir?("/sys/fs/cgroup/tank/rt-nolimits")
@@ -64,7 +63,7 @@ defmodule Tank.RuntimeTest do
     Process.flag(:trap_exit, true)
 
     p = pod("rt-signal", %{command: ["/bin/sleep", "60"]})
-    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
     assert_receive {:tank, :running, host_pid}, 15_000
     ref = Process.monitor(runtime)
 
@@ -81,7 +80,7 @@ defmodule Tank.RuntimeTest do
     Process.flag(:trap_exit, true)
 
     p = pod("rt-exit-code", %{command: ["/bin/sh", "-c", "exit 3"]}, %{restart: :never})
-    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
     ref = Process.monitor(runtime)
 
     assert_receive {:DOWN, ^ref, :process, ^runtime, reason}, 15_000
@@ -92,7 +91,7 @@ defmodule Tank.RuntimeTest do
     test "begin_attach hands off the main PTY; detach leaves the workload running" do
       # /bin/cat as the main process: interactive, stays alive on a PTY.
       p = pod("rt-attach", %{command: ["/bin/cat"], tty: true})
-      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
       assert_receive {:tank, :running, _host_pid}, 15_000
 
       # Hand the session to this test; we become the owner of :pty_out.
@@ -111,7 +110,7 @@ defmodule Tank.RuntimeTest do
 
     test "a main process that exits during attach makes end_attach stop the runtime" do
       p = pod("rt-attach-exit", %{command: ["/bin/cat"], tty: true}, %{restart: :never})
-      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
       assert_receive {:tank, :running, _host_pid}, 15_000
 
       # The runtime stops abnormally below; trap its linked exit so it doesn't
@@ -136,7 +135,7 @@ defmodule Tank.RuntimeTest do
 
     test "begin_attach refuses a non-tty container with :not_a_tty" do
       p = pod("rt-attach-notty", %{command: ["/bin/sleep", "30"]})
-      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
       assert_receive {:tank, :running, _host_pid}, 15_000
 
       assert {:error, :not_a_tty} = Runtime.begin_attach(runtime, self())
@@ -146,7 +145,7 @@ defmodule Tank.RuntimeTest do
 
     test "a tty container's main process gets a default TERM (so readline works)" do
       p = pod("rt-term", %{command: ["/bin/sh"], tty: true})
-      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: [cache: @cache])
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
       assert_receive {:tank, :running, _host_pid}, 15_000
 
       {:ok, session} = Runtime.begin_attach(runtime, self())

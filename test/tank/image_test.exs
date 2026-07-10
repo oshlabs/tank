@@ -1,17 +1,17 @@
 defmodule Tank.ImageTest do
+  # Registry mechanics against a hermetic local registry (Stevedore.Testing):
+  # a Stevedore.Server on an ephemeral port serving a synthetic image. Real
+  # HTTP pulls, zero external network — this module runs in the default suite.
+  # Not async: the registry binds a port.
   use ExUnit.Case, async: false
 
   import ExUnit.CaptureLog
 
-  @ref "alpine:latest"
-
-  # A persistent cache shared across runs, so repeated runs don't re-download
-  # from the registry. Wiped only when forcing a refetch (TANK_IMAGE_REFRESH=1).
-  @cache Path.join(System.tmp_dir!(), "tank-image-cache")
+  alias Stevedore.Testing
 
   describe "offline (no network)" do
-    # An offline pull against an empty cache touches no registry, so this runs
-    # in the default suite -- it covers the cache-miss path.
+    # An offline pull against an empty cache touches no registry, so these
+    # exercise the cache-miss path with no server at all.
     test "a cache miss is reported, with no registry I/O" do
       empty =
         Path.join(System.tmp_dir!(), "tank-image-empty-#{System.unique_integer([:positive])}")
@@ -19,7 +19,7 @@ defmodule Tank.ImageTest do
       on_exit(fn -> File.rm_rf!(empty) end)
 
       assert {:error, {:not_cached, "registry-1.docker.io/library/alpine:latest"}} =
-               Tank.Image.pull(@ref, cache: empty, offline: true)
+               Tank.Image.pull("alpine:latest", cache: empty, offline: true)
     end
 
     test "with no :cache, the cache dir comes from config :tank, image_cache" do
@@ -38,70 +38,67 @@ defmodule Tank.ImageTest do
       end)
 
       # No :cache option → default_cache reads the configured (empty) dir → miss.
-      assert {:error, {:not_cached, _}} = Tank.Image.pull(@ref, offline: true)
+      assert {:error, {:not_cached, _}} = Tank.Image.pull("alpine:latest", offline: true)
     end
   end
 
-  describe "pull from a real registry" do
-    # These reach Docker Hub -- run with `mix test --include network`. The
-    # persistent @cache means only the first run downloads; later runs reuse it.
-    @describetag :network
-
+  describe "pull from a registry" do
     setup do
-      # Force a real refetch (ignoring cached blobs + rootfs) with
-      #   TANK_IMAGE_REFRESH=1 mix test --include network
-      if System.get_env("TANK_IMAGE_REFRESH") in ~w(1 true yes), do: File.rm_rf!(@cache)
-      :ok
+      reg = Testing.start_registry!()
+      {:ok, image} = Testing.synthetic_image()
+      ref = Testing.push!(reg, image, "tank/test:latest")
+
+      cache =
+        Path.join(System.tmp_dir!(), "tank-image-cache-#{System.unique_integer([:positive])}")
+
+      on_exit(fn ->
+        File.rm_rf!(reg.store)
+        File.rm_rf!(cache)
+      end)
+
+      %{ref: ref, cache: cache}
     end
 
-    test "assembles a runnable alpine rootfs (cached for re-pulls)" do
-      assert {:ok, %{rootfs: rootfs, config: config}} = Tank.Image.pull(@ref, cache: @cache)
+    test "assembles a runnable rootfs from the pulled layers", %{ref: ref, cache: cache} do
+      assert {:ok, %{rootfs: rootfs, config: config}} = Tank.Image.pull(ref, cache: cache)
 
       # the layer extracted into a real directory tree
       assert File.dir?(rootfs)
-      assert File.exists?(Path.join(rootfs, "etc/alpine-release"))
+      assert File.read!(Path.join(rootfs, "etc/stevedore-test")) == "synthetic\n"
 
-      # alpine's absolute busybox symlinks survived extraction -- the whole
-      # reason for the hand-rolled tar reader
+      # the absolute symlink survived extraction -- the whole reason for the
+      # hand-rolled tar reader
       assert {:ok, "/bin/busybox"} = File.read_link(Path.join(rootfs, "bin/sh"))
 
       # the image config came back parsed
-      assert config["architecture"] in ["amd64", "arm64"]
-      assert is_list(config["config"]["Cmd"])
+      assert config["config"]["Cmd"] == ["/bin/sh"]
     end
 
-    test "content-addressed -- a re-pull yields the same rootfs" do
-      assert {:ok, %{rootfs: rootfs}} = Tank.Image.pull(@ref, cache: @cache)
-      assert {:ok, %{rootfs: ^rootfs}} = Tank.Image.pull(@ref, cache: @cache)
+    test "content-addressed -- a re-pull yields the same rootfs", %{ref: ref, cache: cache} do
+      assert {:ok, %{rootfs: rootfs}} = Tank.Image.pull(ref, cache: cache)
+      assert {:ok, %{rootfs: ^rootfs}} = Tank.Image.pull(ref, cache: cache)
     end
 
-    test "offline serves the now-cached image with no network" do
+    test "offline serves the now-cached image with no network", %{ref: ref, cache: cache} do
       # warm the cache (online), then prove the offline path returns it
-      assert {:ok, %{rootfs: rootfs}} = Tank.Image.pull(@ref, cache: @cache)
+      assert {:ok, %{rootfs: rootfs}} = Tank.Image.pull(ref, cache: cache)
 
       assert {:ok, %{rootfs: ^rootfs, config: config}} =
-               Tank.Image.pull(@ref, cache: @cache, offline: true)
+               Tank.Image.pull(ref, cache: cache, offline: true)
 
-      assert is_list(config["config"]["Cmd"])
+      assert config["config"]["Cmd"] == ["/bin/sh"]
     end
 
-    test "logs honestly: 'pulling' on a miss, 'using cached' on a hit" do
-      fresh =
-        Path.join(System.tmp_dir!(), "tank-image-log-#{System.unique_integer([:positive])}")
-
+    test "logs honestly: 'pulling' on a miss, 'using cached' on a hit", %{ref: ref, cache: cache} do
       previous = Logger.level()
       Logger.configure(level: :info)
+      on_exit(fn -> Logger.configure(level: previous) end)
 
-      on_exit(fn ->
-        File.rm_rf!(fresh)
-        Logger.configure(level: previous)
-      end)
-
-      miss = capture_log(fn -> assert {:ok, _} = Tank.Image.pull(@ref, cache: fresh) end)
+      miss = capture_log(fn -> assert {:ok, _} = Tank.Image.pull(ref, cache: cache) end)
       assert miss =~ "tank: pulling"
       refute miss =~ "using cached"
 
-      hit = capture_log(fn -> assert {:ok, _} = Tank.Image.pull(@ref, cache: fresh) end)
+      hit = capture_log(fn -> assert {:ok, _} = Tank.Image.pull(ref, cache: cache) end)
       assert hit =~ "tank: using cached"
       refute hit =~ "tank: pulling"
     end

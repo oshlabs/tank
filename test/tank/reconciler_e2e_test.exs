@@ -8,10 +8,9 @@ defmodule Tank.ReconcilerE2ETest do
 
   alias Tank.Reconciler
 
-  @cache Path.join(System.tmp_dir!(), "tank-image-cache")
 
   setup_all do
-    {:ok, _} = Tank.Image.pull("alpine:latest", cache: @cache)
+    {_ref, _} = Tank.TestImages.alpine!()
     dir = Path.join(System.tmp_dir!(), "tank-e2e-test-#{System.unique_integer([:positive])}")
     start_supervised!({Tank.Store, data_dir: dir})
     on_exit(fn -> File.rm_rf(dir) end)
@@ -28,7 +27,7 @@ defmodule Tank.ReconcilerE2ETest do
         {Reconciler,
          runtime: Tank.Runtime,
          owner: self(),
-         runtime_opts: [image: [cache: @cache]],
+         runtime_opts: [image: Tank.TestImages.image_opts()],
          interval: :timer.hours(1)}
       )
 
@@ -41,7 +40,7 @@ defmodule Tank.ReconcilerE2ETest do
         name: "e2e",
         network: :none,
         restart: :never,
-        containers: [%{name: "app", image: "alpine:latest", command: ["/bin/sleep", "60"]}]
+        containers: [%{name: "app", image: Tank.TestImages.alpine_ref(), command: ["/bin/sleep", "60"]}]
       })
 
     # The reconciler started the runtime; the runtime brought the container up.

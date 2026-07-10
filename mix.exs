@@ -13,6 +13,7 @@ defmodule Tank.MixProject do
       app: :tank,
       version: @version,
       elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: false,
       deps: deps(),
       name: "Tank",
@@ -50,13 +51,18 @@ defmodule Tank.MixProject do
     ]
   end
 
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
+
   defp deps do
     [
       {:linx, "~> 0.1"},
       # OCI toolkit — all registry fetching goes through Stevedore (Tank.Image.Registry
       # is a thin shim over it). 0.2 adds the token cache the shim threads per pull. Its
       # docker:// client uses :req, declared below.
-      {:stevedore, "~> 0.2"},
+      # Sibling checkout while Stevedore.Testing (the suite's hermetic local
+      # registry) is unreleased — back to `"~> 0.3"` on hex when it ships.
+      {:stevedore, path: "../stevedore"},
       # HTTP client: Tank.Image.Registry's shim and Stevedore's docker:// client both use it.
       {:req, "~> 0.5"},
       # Tree-structured, Raft-replicated desired-state store (Tank.Store).
@@ -66,6 +72,11 @@ defmodule Tank.MixProject do
       # [:starfish] subtree of Tank's own Khepri store. Pre-Hex sibling
       # checkout; becomes a hex dep when Starfish is renamed + published.
       {:starfish, path: "../starfish"},
+      # Test-only: activate Stevedore's optional registry server (Plug over
+      # Bandit) so the suite pulls from a local, hermetic registry instead of
+      # Docker Hub — see test/support/local_registry.ex.
+      {:plug, "~> 1.16", only: :test},
+      {:bandit, "~> 1.5", only: :test},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
