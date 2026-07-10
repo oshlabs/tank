@@ -5,8 +5,11 @@ defmodule Tank.Nic do
     * `mode` — `:macvlan` (v1); `:bridge` / `:ipvlan` are modelled for later.
     * `parent` — the host uplink to attach to, or `:auto` to resolve it via
       `Tank.Host`.
-    * `ip` — `{address, prefix}` for a static address (v1), or `:dhcp` (later).
-    * `gateway` — optional default-route next hop for this NIC.
+    * `ip` — `{address, prefix}` for a static address, `{:ipam, subnet}` to
+      draw one from the named pool of the embedded IPAM at bring-up (see
+      `Tank.Ipam`), or `:dhcp` (later).
+    * `gateway` — optional default-route next hop for this NIC. With an
+      `{:ipam, subnet}` address, nil defaults from the pool's gateway.
 
   Loopback is always raised by the runtime and is not listed here.
   """
@@ -15,7 +18,7 @@ defmodule Tank.Nic do
 
   @modes [:macvlan, :bridge, :ipvlan]
 
-  @type ip :: {String.t(), 0..32} | :dhcp
+  @type ip :: {String.t(), 0..32} | {:ipam, String.t()} | :dhcp
   @type t :: %__MODULE__{
           name: String.t(),
           mode: :macvlan | :bridge | :ipvlan,
@@ -53,6 +56,13 @@ defmodule Tank.Nic do
   defp parent(other), do: {:error, {:invalid_parent, other}}
 
   defp ip(:dhcp), do: {:ok, :dhcp}
+
+  defp ip({:ipam, subnet}) when is_binary(subnet) do
+    case Starfish.IP.Subnet.parse(subnet) do
+      {:ok, _} -> {:ok, {:ipam, subnet}}
+      {:error, _} -> {:error, {:invalid_ipam_subnet, subnet}}
+    end
+  end
 
   defp ip({address, prefix}) when is_integer(prefix) and prefix in 0..32 do
     with {:ok, _} <- Validate.ipv4(address), do: {:ok, {address, prefix}}

@@ -181,6 +181,17 @@ defmodule Tank.PodTest do
       assert {:ok, %Nic{ip: :dhcp, parent: :auto}} = Nic.new(%{name: "eth0", ip: :dhcp})
     end
 
+    test "accepts an {:ipam, subnet} intent and validates the CIDR" do
+      assert {:ok, %Nic{ip: {:ipam, "10.0.0.0/24"}}} =
+               Nic.new(%{name: "eth0", ip: {:ipam, "10.0.0.0/24"}})
+
+      assert {:error, {:invalid_ipam_subnet, "10.0.0.0"}} =
+               Nic.new(%{name: "eth0", ip: {:ipam, "10.0.0.0"}})
+
+      assert {:error, {:invalid_ipam_subnet, "10.0.0.0/99"}} =
+               Nic.new(%{name: "eth0", ip: {:ipam, "10.0.0.0/99"}})
+    end
+
     test "rejects an unknown mode and a bad gateway" do
       assert {:error, {:not_allowed, :vlan, _}} =
                Nic.new(%{name: "eth0", ip: :dhcp, mode: :vlan})

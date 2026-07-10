@@ -21,12 +21,14 @@ defmodule Tank.Application do
 
   defp children do
     if store_enabled?() do
-      # The reconciler reads the store, so it starts after it. Its options
-      # (interval, backoff, image cache via :runtime_opts) come from config.
-      [
-        {Tank.Store, Application.get_env(:tank, :store, [])},
-        {Tank.Reconciler, Application.get_env(:tank, :reconciler, [])}
-      ]
+      store_opts = Application.get_env(:tank, :store, [])
+
+      # The IPAM stack attaches to the store, and the reconciler reads both, so
+      # the order is store → ipam → reconciler. Reconciler options (interval,
+      # backoff, image cache via :runtime_opts) come from config.
+      [{Tank.Store, store_opts}] ++
+        Tank.Ipam.child_specs(Application.get_env(:tank, :ipam), store_opts) ++
+        [{Tank.Reconciler, Application.get_env(:tank, :reconciler, [])}]
     else
       []
     end

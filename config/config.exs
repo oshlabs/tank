@@ -11,6 +11,11 @@ config :tank, start_store?: true
 # config; a consumer swaps in its own. See `Tank.Host`.
 config :tank, host: Tank.Host.Static
 
+# Starfish runs embedded: Tank starts the IPAM stack itself (see `Tank.Ipam`),
+# attached to Tank's own Khepri store — Starfish's own application supervisor
+# must stay off. Pools are declared under `config :tank, :ipam` (runtime.exs).
+config :starfish, start?: false
+
 # Reconciler restart backoff: the first restart waits `backoff_base`, doubling
 # on repeated rapid failures up to `backoff_cap`. A run that lasts `stable_window`
 # resets the doubling back to `backoff_base`. The in-code defaults are

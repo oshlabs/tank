@@ -159,12 +159,17 @@ defmodule Tank.Reconciler do
   # === the pass =============================================================
 
   defp reconcile(state) do
-    plan = Plan.diff(Store.list_pods(), tracked_specs(state.pods))
+    desired = Store.list_pods()
+    plan = Plan.diff(desired, tracked_specs(state.pods))
 
     pods =
       state.pods
       |> stop_pods(plan.stop ++ Enum.map(plan.restart, & &1.name), state)
       |> start_pods(plan.restart ++ plan.start, state)
+
+    # Level-triggered like the rest of the pass: any IPAM allocation whose pod
+    # has left desired state is released, even if its teardown was missed.
+    Tank.Ipam.reconcile(Enum.map(desired, & &1.name))
 
     %{state | pods: pods}
   end

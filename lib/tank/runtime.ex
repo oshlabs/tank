@@ -45,7 +45,7 @@ defmodule Tank.Runtime do
   require Logger
 
   alias Linx.Process, as: Workload
-  alias Tank.{Container, OCI, Pod}
+  alias Tank.{Container, Ipam, OCI, Pod}
   alias Tank.Runtime.{Etc, Limits, Network, Rootfs}
 
   # Always-fresh namespaces; :net is added unless the pod shares the host's.
@@ -278,9 +278,12 @@ defmodule Tank.Runtime do
   def handle_info(_msg, state), do: {:noreply, state}
 
   # Runs in the child's namespaces, host-side, while the workload waits.
+  # {:ipam, subnet} NIC intents resolve to concrete addresses here, just before
+  # actuation, so a restarting pod re-allocates (affinity keeps its address).
   defp bring_up(state, host_pid) do
     with :ok <- Rootfs.setup(host_pid, state.rootfs, state.etc_files),
-         :ok <- Network.setup(host_pid, state.pod.network),
+         {:ok, network} <- Ipam.resolve(state.pod),
+         :ok <- Network.setup(host_pid, network),
          {:ok, cgroup} <- Limits.apply(state.pod.name, host_pid, state.container.limits) do
       {:ok, cgroup}
     end

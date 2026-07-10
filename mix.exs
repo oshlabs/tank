@@ -61,6 +61,11 @@ defmodule Tank.MixProject do
       {:req, "~> 0.5"},
       # Tree-structured, Raft-replicated desired-state store (Tank.Store).
       {:khepri, "~> 0.18.0"},
+      # Network services (IPAM, and later DNS/DHCP/RA) embedded per the plan:
+      # pod NICs draw addresses from Starfish IPAM (Tank.Ipam), stored in a
+      # [:starfish] subtree of Tank's own Khepri store. Pre-Hex sibling
+      # checkout; becomes a hex dep when Starfish is renamed + published.
+      {:starfish, path: "../starfish"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end
