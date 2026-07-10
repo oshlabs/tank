@@ -192,8 +192,11 @@ defmodule Tank.Runtime.Logs do
           :error -> drain(state, tries - 1)
         end
 
-      {:accepted, _stream, _sock} ->
-        drain(state, tries - 1)
+      {:accepted, stream, sock} ->
+        # The workload lived so briefly that the accept handoff races the
+        # teardown: finish it so the kernel-buffered bytes still drain.
+        :inet.setopts(sock, active: true)
+        drain(%{state | socks: Map.put(state.socks, sock, stream)}, tries - 1)
 
       {:tcp_closed, _sock} ->
         drain(state, tries - 1)

@@ -69,6 +69,7 @@ defmodule TankWeb do
       import Phoenix.HTML
 
       # Gooey function components (per-module — there is no bundle import).
+      import Gooey.Components.Alert
       import Gooey.Components.Badge
       import Gooey.Components.Button
       import Gooey.Components.Card

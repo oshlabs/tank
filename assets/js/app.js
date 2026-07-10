@@ -11,6 +11,7 @@ import {Hooks as GooeyHooks, initGooeyFx} from "../../../gooey/assets/js/gooey"
 import {GooeyChart} from "../../../gooey/assets/js/hooks/chart"
 import {GooeyDataTable} from "../../../gooey/assets/js/hooks/data_table"
 import {GooeyTerminal} from "../../../gooey/assets/js/hooks/terminal"
+import {GooeyLogViewer} from "../../../gooey/assets/js/hooks/log_viewer"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 
@@ -26,6 +27,7 @@ const liveSocket = new LiveSocket("/live", Socket, {
     GooeyChart,
     GooeyDataTable,
     GooeyTerminal,
+    GooeyLogViewer,
     ...colocatedHooks,
   },
 })
