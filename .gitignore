@@ -3,3 +3,8 @@
 /cover/
 erl_crash.dump
 *.ez
+
+# tank_web assets: build outputs and npm deps (sources live in assets/).
+/assets/node_modules/
+/priv/static/assets/
+/priv/static/fonts/

@@ -28,6 +28,48 @@ config :tank, :reconciler,
   backoff_cap: :timer.seconds(30),
   stable_window: :timer.seconds(30)
 
-if config_env() == :test do
-  import_config "test.exs"
-end
+# --- The web face (lib/tank_web) --------------------------------------------
+# Compile-time endpoint/asset config. Whether the endpoint actually *starts*
+# is a runtime decision (`config :tank, :web, enabled: true` — see dev.exs and
+# runtime.exs); with it absent Tank boots headless exactly as before.
+
+config :tank, TankWeb.Endpoint,
+  url: [host: "localhost"],
+  adapter: Bandit.PhoenixAdapter,
+  render_errors: [formats: [html: TankWeb.ErrorHTML], layout: false],
+  pubsub_server: Tank.PubSub,
+  live_view: [signing_salt: "gJ8kQ2xT"]
+
+config :phoenix, :json_library, Jason
+
+# esbuild: app.js bundled as ESM (loaded with type="module") so import.meta
+# resolves — required by Gooey's terminal hooks. NODE_PATH lists
+# assets/node_modules first so packages used by hooks (@wterm/dom) resolve
+# even when the importing hook lives in the Gooey dep.
+esbuild_node_path = [
+  Path.expand("../assets/node_modules", __DIR__),
+  Path.expand("../deps", __DIR__),
+  Mix.Project.build_path()
+]
+
+config :esbuild,
+  version: "0.25.4",
+  tank: [
+    args:
+      ~w(js/app.js --bundle --format=esm --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/*),
+    cd: Path.expand("../assets", __DIR__),
+    env: %{"NODE_PATH" => esbuild_node_path}
+  ]
+
+config :tailwind,
+  version: "4.1.12",
+  tank: [
+    args: ~w(
+      --input=assets/css/app.css
+      --output=priv/static/assets/css/app.css
+    ),
+    cd: Path.expand("..", __DIR__)
+  ]
+
+# Environment-specific config (dev watchers, test store settings, …).
+import_config "#{config_env()}.exs"

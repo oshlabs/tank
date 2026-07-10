@@ -54,7 +54,9 @@ defmodule Tank.Runtime.VolumesTest do
              Volumes.resolve(p, container(p), dir)
 
     # Alone, the existing one resolves — with read_only threaded through.
-    p_ok = pod([%{name: "ok", source: {:host, src}}], [%{volume: "ok", path: "/ok", read_only: true}])
+    p_ok =
+      pod([%{name: "ok", source: {:host, src}}], [%{volume: "ok", path: "/ok", read_only: true}])
+
     assert {:ok, [%{source: ^src, path: "/ok", read_only: true}]} =
              Volumes.resolve(p_ok, container(p_ok), dir)
   end
@@ -68,7 +70,9 @@ defmodule Tank.Runtime.VolumesTest do
 
   test "a hand-built mount naming no volume is refused (totality)", %{tmp_dir: dir} do
     # Pod.new/1 validates references; resolve stays safe without it.
-    container = Container.new!(%{name: "c", image: "i:1", mounts: [%{volume: "ghost", path: "/g"}]})
+    container =
+      Container.new!(%{name: "c", image: "i:1", mounts: [%{volume: "ghost", path: "/g"}]})
+
     p = %Pod{name: "p", containers: [container], volumes: [Volume.new!(%{name: "real"})]}
 
     assert {:error, {:unknown_volume, "ghost"}} = Volumes.resolve(p, container, dir)

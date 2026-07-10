@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en" data-gooey-themes={Gooey.Theme.registry_json()}>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <.live_title default="Tank" suffix=" · Tank">
+      {assigns[:page_title]}
+    </.live_title>
+    <link phx-track-static rel="stylesheet" href={~p"/assets/css/app.css"} />
+    <script phx-track-static type="module" src={~p"/assets/js/app.js"}>
+    </script>
+    <script>
+      // Apply the persisted theme before first paint. Tank's default is its
+      // own theme (the aquarium — registered dark in Gooey.Theme); the user's
+      // pick persists in localStorage like every Gooey app.
+      (() => {
+        const html = document.documentElement;
+        const registry = JSON.parse(html.getAttribute("data-gooey-themes"));
+        const setTheme = (theme) => {
+          if (!registry[theme]) theme = "tank";
+          localStorage.setItem("gooey-theme", theme);
+          html.setAttribute("data-theme", theme);
+          html.setAttribute("data-appearance", registry[theme].appearance);
+        };
+        setTheme(localStorage.getItem("gooey-theme"));
+        window.addEventListener("storage", (e) => e.key === "gooey-theme" && setTheme(e.newValue));
+        window.addEventListener("phx:set-theme", (e) => setTheme(e.target.dataset.phxTheme));
+      })();
+    </script>
+  </head>
+  <body>
+    {@inner_content}
+  </body>
+</html>

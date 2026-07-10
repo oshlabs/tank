@@ -12,9 +12,22 @@ defmodule Tank.MixProject do
     [
       app: :tank,
       version: @version,
-      elixir: "~> 1.18",
+      # 1.19 floor: gooey (the web layer's component library) requires ~> 1.19;
+      # .tool-versions has pinned 1.19.x suite-wide since the toolchain decision.
+      elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: false,
+      compilers: [:phoenix_live_view] ++ Mix.compilers(),
+      listeners: [Phoenix.CodeReloader],
+      # OFF in dev to break a page-reload loop (Elixir 1.19 + path deps +
+      # code reloader): deps compile with consolidation off, and inside the
+      # dep Mix.Project.consolidation_path/0 resolves to OUR consolidated
+      # dir, so every per-request dep pass rm_rf's it; the next pass then
+      # force-reconsolidates → phoenix_live_view rewrites the colocated-hooks
+      # bundle → esbuild --watch rebuilds → live_reload reloads every tab →
+      # forever. Diagnosed in gooey/showcase; tank has four path deps.
+      consolidate_protocols: Mix.env() != :dev,
+      aliases: aliases(),
       deps: deps(),
       name: "Tank",
       description:
@@ -81,12 +94,49 @@ defmodule Tank.MixProject do
       # [:starfish] subtree of Tank's own Khepri store. Pre-Hex sibling
       # checkout; becomes a hex dep when Starfish is renamed + published.
       {:starfish, path: "../starfish"},
-      # Test-only: activate Stevedore's optional registry server (Plug over
-      # Bandit) so the suite pulls from a local, hermetic registry instead of
-      # Docker Hub — see test/support/local_registry.ex.
-      {:plug, "~> 1.16", only: :test},
-      {:bandit, "~> 1.5", only: :test},
+      # The web face (lib/tank_web): Phoenix + LiveView rendering Gooey, the
+      # OSHLabs design system (which ships the "tank" theme). Full deps, not
+      # optional ones — disable-ability is runtime config (`config :tank,
+      # :web`), never compile-time gymnastics. Gooey is pre-Hex: a sibling
+      # checkout like linx/stevedore/starfish, and one more entry in the
+      # path-dep queue that gates tank's next Hex release.
+      {:gooey, path: "../gooey"},
+      {:phoenix, "~> 1.8.3"},
+      {:phoenix_html, "~> 4.1"},
+      {:phoenix_live_view, "~> 1.1"},
+      {:phoenix_live_reload, "~> 1.2", only: :dev},
+      {:jason, "~> 1.4"},
+      {:telemetry_metrics, "~> 1.0"},
+      {:telemetry_poller, "~> 1.0"},
+      {:esbuild, "~> 0.10", runtime: Mix.env() == :dev},
+      {:tailwind, "~> 0.3", runtime: Mix.env() == :dev},
+      {:lazy_html, ">= 0.1.0", only: :test},
+      # Bandit serves both the web endpoint and (test-only) Stevedore's
+      # optional local registry (test/support/local_registry.ex).
+      {:plug, "~> 1.16"},
+      {:bandit, "~> 1.5"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+    ]
+  end
+
+  defp aliases do
+    [
+      setup: ["deps.get", "assets.setup", "assets.build"],
+      "assets.setup": [
+        "tailwind.install --if-missing",
+        "esbuild.install --if-missing",
+        # JS deps used by Gooey's opt-in hooks (@wterm/dom for the terminal).
+        "cmd npm install --prefix assets"
+      ],
+      "assets.build": [
+        "compile",
+        "tailwind tank",
+        "esbuild tank",
+        # Gooey's vendored theme webfonts (its fonts.css expects /fonts/gooey/).
+        "cmd mkdir -p priv/static/fonts/gooey",
+        "cmd sh -c 'cp ../gooey/assets/fonts/*.woff2 priv/static/fonts/gooey/'"
+      ],
+      "assets.deploy": ["tailwind tank --minify", "esbuild tank --minify", "phx.digest"]
     ]
   end
 

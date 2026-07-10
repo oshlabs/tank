@@ -1,0 +1,29 @@
+/* tank_web stylesheet. The OSHLabs token/theme layer (daisyUI + themes +
+ * LiveView variants) lives in Gooey and is pulled in via the @import below.
+ * Path dep → ../../../gooey; a hex consumer would import from deps/gooey. */
+
+@import "tailwindcss" source(none);
+@source "../css";
+@source "../js";
+@source "../../lib/tank_web";
+
+/* wterm terminal styles (Gooey.Components.Terminal). */
+@import "../node_modules/@wterm/dom/src/terminal.css";
+
+/* The OSHLabs design system, shipped by Gooey (includes the tank theme). */
+@import "../../../gooey/assets/css/gooey.css";
+
+/* Chrome glass (app bar + sidebar): tinted by the theme's own canvas color,
+ * blurred so the aquarium ambience shows through. Same recipe as the
+ * showcase's chrome. */
+.gy-glass {
+  background: color-mix(in oklab, var(--gy-bg-canvas) 50%, transparent);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* Make LiveView wrapper divs transparent for layout. */
+[data-phx-session],
+[data-phx-teleported-src] {
+  display: contents;
+}

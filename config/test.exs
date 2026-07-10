@@ -6,3 +6,9 @@ config :tank, start_store?: false
 
 # Quiet Ra/Khepri leader-election chatter (debug/info/notice) in test output.
 config :logger, level: :warning
+
+# LiveView tests drive views through the endpoint module without a listening
+# server; the endpoint itself never starts unless a test asks for it.
+config :tank, TankWeb.Endpoint,
+  server: false,
+  secret_key_base: String.duplicate("tanktest", 8)

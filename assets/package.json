@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@wterm/dom": "^0.3.0"
+  }
+}

@@ -8,7 +8,6 @@ defmodule Tank.ReconcilerE2ETest do
 
   alias Tank.Reconciler
 
-
   setup_all do
     # Hermetic: deckhand seeded through a local Stevedore registry, no network.
     deck = Tank.TestImages.deckhand!()

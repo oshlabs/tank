@@ -31,15 +31,24 @@ defmodule Tank.Application do
       # The network services attach to the store, and the reconciler reads
       # both, so the order is store → net → reconciler. Reconciler options
       # (interval, backoff, image cache via :runtime_opts) come from config.
+      # The web face (when enabled) starts last: the domain is ready at the
+      # first request.
       [logs_registry, {Tank.Store, store_opts}] ++
         Tank.Net.child_specs(Application.get_env(:tank, :net), store_opts) ++
-        [{Tank.Reconciler, Application.get_env(:tank, :reconciler, [])}]
+        [{Tank.Reconciler, Application.get_env(:tank, :reconciler, [])}] ++
+        web_children()
     else
-      [logs_registry]
+      [logs_registry] ++ web_children()
     end
   end
 
   # Consumers (and the test suite) that manage the store themselves set
   # `config :tank, start_store?: false`.
   defp store_enabled?, do: Application.get_env(:tank, :start_store?, true)
+
+  # The admin UI is opt-in (`config :tank, :web, enabled: true` — dev.exs, or
+  # TANK_WEB=1 via runtime.exs). Absent → headless: no Phoenix process starts.
+  defp web_children do
+    if Application.get_env(:tank, :web, [])[:enabled], do: [TankWeb.Supervisor], else: []
+  end
 end

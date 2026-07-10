@@ -10,7 +10,6 @@ defmodule Tank.RuntimeTest do
 
   alias Tank.{Pod, Runtime}
 
-
   setup_all do
     # Everything here runs the hermetic deckhand image (seeded through a local
     # Stevedore registry — zero network): the entrypoint REPL for keepalive/
@@ -231,8 +230,12 @@ defmodule Tank.RuntimeTest do
       GenServer.stop(runtime)
     end
 
-    test "a main process that exits during attach makes end_attach stop the runtime", %{deck: deck} do
-      p = deck_pod("rt-attach-exit", deck, %{command: ["/bin/cat"], tty: true}, %{restart: :never})
+    test "a main process that exits during attach makes end_attach stop the runtime", %{
+      deck: deck
+    } do
+      p =
+        deck_pod("rt-attach-exit", deck, %{command: ["/bin/cat"], tty: true}, %{restart: :never})
+
       {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
       assert_receive {:tank, :running, _host_pid}, 15_000
 

@@ -17,7 +17,6 @@ defmodule Tank.ExecE2ETest do
   alias Linx.Process, as: Workload
   alias Tank.{Reconciler, Runtime}
 
-
   setup_all do
     deck = Tank.TestImages.deckhand!()
     dir = Path.join(System.tmp_dir!(), "tank-exec-e2e-#{System.unique_integer([:positive])}")
