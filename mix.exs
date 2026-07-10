@@ -56,7 +56,16 @@ defmodule Tank.MixProject do
 
   defp deps do
     [
-      {:linx, "~> 0.1"},
+      # Sibling checkout — Tank needs linx's unreleased enter/2 fix (ceaeb2a,
+      # after v0.2.0): released enter joined only the namespaces preceding
+      # :mount — once setns(mnt) ran, /proc/<host_pid> path lookups resolved
+      # in the target's /proc and every later type (uts/ipc/net/pid) fell to
+      # the all-ns ENOENT skip, so Tank.exec landed in the pod's rootfs but
+      # the HOST's netns/pidns. The two-phase join (pin the /proc dirfd, open
+      # all ns fds before the first setns) fixes it; caught by the deckhand
+      # exec e2e (the second instance bound the "taken" port). Release linx
+      # 0.2.1+ and return this to a hex dep.
+      {:linx, path: "../linx"},
       # OCI toolkit — all registry fetching goes through Stevedore (Tank.Image.Registry
       # is a thin shim over it). 0.2 adds the token cache the shim threads per pull. Its
       # docker:// client uses :req, declared below.

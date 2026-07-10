@@ -43,4 +43,59 @@ defmodule Tank.TestImages do
         {ref, pulled}
     end
   end
+
+  @doc """
+  Seed a per-module cache with the runnable **deckhand** image, pulled from a
+  hermetic local registry (`Stevedore.Testing` — the same `Stevedore.Server`
+  that tankyard will run). Zero external network, ever. Call from `setup_all`;
+  the registry, store, and cache are supervised/cleaned by ExUnit.
+
+  Returns `%{ref:, cache:, image_opts:, pulled:}` — pods use `ref` with
+  `image_opts` (offline: the cache was just warmed).
+  """
+  def deckhand! do
+    reg = supervised_registry!()
+
+    # An explicit PATH so exec-context env threading stays observable.
+    {:ok, image} =
+      Stevedore.Testing.runnable_image(
+        config: %{entrypoint: ["/bin/deckhand"], cmd: [], env: ["PATH=/bin:/usr/bin"]}
+      )
+
+    ref = Stevedore.Testing.push!(reg, image, "tank/deckhand:latest")
+
+    cache =
+      Path.join(System.tmp_dir!(), "tank-deckhand-cache-#{System.unique_integer([:positive])}")
+
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf!(cache) end)
+
+    {:ok, pulled} = Tank.Image.pull(ref, cache: cache)
+    %{ref: ref, cache: cache, image_opts: [cache: cache, offline: true], pulled: pulled}
+  end
+
+  @doc """
+  A hermetic local registry supervised by the current ExUnit module/test —
+  unlike `Stevedore.Testing.start_registry!/1` (linked to the caller), this
+  survives `setup_all`'s process exiting. Returns the same registry map shape.
+  """
+  def supervised_registry! do
+    {:ok, sock} = :gen_tcp.listen(0, [:binary, active: false])
+    {:ok, port} = :inet.port(sock)
+    :gen_tcp.close(sock)
+
+    store =
+      Path.join(System.tmp_dir!(), "tank-test-registry-#{System.unique_integer([:positive])}")
+
+    pid =
+      ExUnit.Callbacks.start_supervised!(
+        {Stevedore.Server,
+         store: store,
+         port: port,
+         authorize: fn _conn, _action, _scope -> :ok end,
+         uploads: :"tank_test_registry_uploads_#{port}"}
+      )
+
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf!(store) end)
+    %{registry: "localhost:#{port}", port: port, store: store, pid: pid}
+  end
 end

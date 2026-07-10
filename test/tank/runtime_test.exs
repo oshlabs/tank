@@ -12,9 +12,12 @@ defmodule Tank.RuntimeTest do
 
 
   setup_all do
-    # Warm the image cache so per-test bring-up is fast.
+    # Keepalive-shaped tests run the hermetic deckhand image (seeded through a
+    # local Stevedore registry — zero network); tests about *shell* semantics
+    # (exit codes, cat on a PTY, $TERM) keep real alpine.
+    deck = Tank.TestImages.deckhand!()
     {_ref, _} = Tank.TestImages.alpine!()
-    :ok
+    {:ok, deck: deck}
   end
 
   defp pod(name, container_attrs, pod_attrs \\ %{}) do
@@ -23,14 +26,16 @@ defmodule Tank.RuntimeTest do
     Pod.new!(Map.merge(%{name: name, network: :none, containers: [container]}, pod_attrs))
   end
 
-  test "brings a pod to running with its rootfs, network, and cgroup limits" do
-    p =
-      pod("rt-run", %{
-        command: ["/bin/sleep", "30"],
-        limits: %{memory: 64 <<< 20, pids: 50}
-      })
+  # A deckhand pod: the image entrypoint is the keepalive (runs until signaled).
+  defp deck_pod(name, deck, container_attrs \\ %{}) do
+    container = Map.merge(%{name: "app", image: deck.ref}, container_attrs)
+    Pod.new!(%{name: name, network: :none, containers: [container]})
+  end
 
-    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
+  test "brings a pod to running with its rootfs, network, and cgroup limits", %{deck: deck} do
+    p = deck_pod("rt-run", deck, %{limits: %{memory: 64 <<< 20, pids: 50}})
+
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
 
     assert_receive {:tank, :running, host_pid}, 15_000
     assert {:ok, ^host_pid} = Runtime.host_pid(runtime)
@@ -47,9 +52,9 @@ defmodule Tank.RuntimeTest do
     refute File.dir?(cgroup)
   end
 
-  test "a pod with no limits needs no cgroup" do
-    p = pod("rt-nolimits", %{command: ["/bin/sleep", "10"]})
-    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
+  test "a pod with no limits needs no cgroup", %{deck: deck} do
+    p = deck_pod("rt-nolimits", deck)
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
 
     assert_receive {:tank, :running, _host_pid}, 15_000
     refute File.dir?("/sys/fs/cgroup/tank/rt-nolimits")
@@ -57,13 +62,13 @@ defmodule Tank.RuntimeTest do
     GenServer.stop(runtime)
   end
 
-  test "a workload killed by a signal stops under a :shutdown reason" do
+  test "a workload killed by a signal stops under a :shutdown reason", %{deck: deck} do
     # The reconciler restarts off this reason (any non-:normal reason → restart
     # per policy); the :shutdown wrapper keeps OTP from logging a crash report.
     Process.flag(:trap_exit, true)
 
-    p = pod("rt-signal", %{command: ["/bin/sleep", "60"]})
-    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
+    p = deck_pod("rt-signal", deck)
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
     assert_receive {:tank, :running, host_pid}, 15_000
     ref = Process.monitor(runtime)
 
@@ -133,9 +138,9 @@ defmodule Tank.RuntimeTest do
       assert_received {:tank, :signaled, 9}
     end
 
-    test "begin_attach refuses a non-tty container with :not_a_tty" do
-      p = pod("rt-attach-notty", %{command: ["/bin/sleep", "30"]})
-      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
+    test "begin_attach refuses a non-tty container with :not_a_tty", %{deck: deck} do
+      p = deck_pod("rt-attach-notty", deck)
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
       assert_receive {:tank, :running, _host_pid}, 15_000
 
       assert {:error, :not_a_tty} = Runtime.begin_attach(runtime, self())

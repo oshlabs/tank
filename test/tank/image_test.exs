@@ -89,6 +89,31 @@ defmodule Tank.ImageTest do
       assert config["config"]["Cmd"] == ["/bin/sh"]
     end
 
+    test "a multi-arch index resolves to the host platform's manifest", %{cache: cache} do
+      # Push deckhand for BOTH arches under a real OCI index; the pull must
+      # walk index → platform manifest and land the host-arch image. This path
+      # previously had no hermetic coverage (only real registries' indexes).
+      reg = Tank.TestImages.supervised_registry!()
+      {:ok, index} = Stevedore.Testing.runnable_image(platforms: :all)
+      ref = "#{reg.registry}/tank/deckhand:multi"
+      {:ok, _} = Stevedore.copy(index, "docker://" <> ref, all: true, scheme: "http")
+
+      assert {:ok, %{rootfs: rootfs, config: config}} = Tank.Image.pull(ref, cache: cache)
+
+      # The resolved image is the host platform's slice of the index...
+      host_arch =
+        case to_string(:erlang.system_info(:system_architecture)) do
+          "x86_64" <> _ -> "amd64"
+          "aarch64" <> _ -> "arm64"
+        end
+
+      assert config["architecture"] == host_arch
+
+      # ...and its rootfs carries the runnable binary.
+      assert File.exists?(Path.join(rootfs, "bin/deckhand"))
+      assert config["config"]["Entrypoint"] == ["/bin/deckhand"]
+    end
+
     test "logs honestly: 'pulling' on a miss, 'using cached' on a hit", %{ref: ref, cache: cache} do
       previous = Logger.level()
       Logger.configure(level: :info)

@@ -10,14 +10,15 @@ defmodule Tank.ReconcilerE2ETest do
 
 
   setup_all do
-    {_ref, _} = Tank.TestImages.alpine!()
+    # Hermetic: deckhand seeded through a local Stevedore registry, no network.
+    deck = Tank.TestImages.deckhand!()
     dir = Path.join(System.tmp_dir!(), "tank-e2e-test-#{System.unique_integer([:positive])}")
     start_supervised!({Tank.Store, data_dir: dir})
     on_exit(fn -> File.rm_rf(dir) end)
-    :ok
+    {:ok, deck: deck}
   end
 
-  setup do
+  setup %{deck: deck} do
     for pod <- Tank.list(), do: Tank.delete(pod.name)
 
     # The real Tank.Runtime, owner: self() so we see :running; image cache via
@@ -27,20 +28,20 @@ defmodule Tank.ReconcilerE2ETest do
         {Reconciler,
          runtime: Tank.Runtime,
          owner: self(),
-         runtime_opts: [image: Tank.TestImages.image_opts()],
+         runtime_opts: [image: deck.image_opts],
          interval: :timer.hours(1)}
       )
 
     {:ok, reconciler: r}
   end
 
-  test "apply brings up a real container; delete tears it down", %{reconciler: r} do
+  test "apply brings up a real container; delete tears it down", %{reconciler: r, deck: deck} do
     :ok =
       Tank.apply(%{
         name: "e2e",
         network: :none,
         restart: :never,
-        containers: [%{name: "app", image: Tank.TestImages.alpine_ref(), command: ["/bin/sleep", "60"]}]
+        containers: [%{name: "app", image: deck.ref}]
       })
 
     # The reconciler started the runtime; the runtime brought the container up.
