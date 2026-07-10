@@ -106,6 +106,37 @@ defmodule Tank.ExecE2ETest do
     Tank.delete("ex")
   end
 
+  test "exec runs a one-shot applet to completion (exit + output propagate)",
+       %{reconciler: r, deck: deck} do
+    # The other exec shape: not an interactive REPL but a short-lived command
+    # that prints and exits — the applet form of the old `sh -c` probe.
+    :ok =
+      Tank.apply(%{
+        name: "ex1",
+        network: :none,
+        restart: :never,
+        containers: [%{name: "app", image: deck.ref}]
+      })
+
+    :ok = Reconciler.sync(r)
+    assert_receive {:tank, :running, _}, 20_000
+    assert %{"ex1" => runtime} = Reconciler.running(r)
+    assert {:ok, ctx} = Runtime.exec_context(runtime)
+
+    {:ok, session} =
+      Workload.enter(ctx.host_pid,
+        argv: ["/bin/cat", "/etc/stevedore-test"],
+        env: ctx.env,
+        stdio: :pty,
+        auto_proceed: true
+      )
+
+    output = collect_pty(session)
+    assert output =~ "synthetic"
+
+    Tank.delete("ex1")
+  end
+
   # Pump :pty_out bytes until the exec session terminates, returning the
   # accumulated output.
   defp collect_pty(session, acc \\ "") do

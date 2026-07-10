@@ -12,24 +12,19 @@ defmodule Tank.RuntimeTest do
 
 
   setup_all do
-    # Keepalive-shaped tests run the hermetic deckhand image (seeded through a
-    # local Stevedore registry — zero network); tests about *shell* semantics
-    # (exit codes, cat on a PTY, $TERM) keep real alpine.
+    # Everything here runs the hermetic deckhand image (seeded through a local
+    # Stevedore registry — zero network): the entrypoint REPL for keepalive/
+    # interactive shapes, the busybox-style applets (/bin/exit, /bin/cat,
+    # /bin/await-sig …) for run-to-completion shapes.
     deck = Tank.TestImages.deckhand!()
-    {_ref, _} = Tank.TestImages.alpine!()
     {:ok, deck: deck}
   end
 
-  defp pod(name, container_attrs, pod_attrs \\ %{}) do
-    container = Map.merge(%{name: "app", image: Tank.TestImages.alpine_ref()}, container_attrs)
-
-    Pod.new!(Map.merge(%{name: name, network: :none, containers: [container]}, pod_attrs))
-  end
-
-  # A deckhand pod: the image entrypoint is the keepalive (runs until signaled).
-  defp deck_pod(name, deck, container_attrs \\ %{}) do
+  # A deckhand pod. Without a :command the image entrypoint (REPL + server) is
+  # the keepalive — runs until signaled; applets run to completion.
+  defp deck_pod(name, deck, container_attrs \\ %{}, pod_attrs \\ %{}) do
     container = Map.merge(%{name: "app", image: deck.ref}, container_attrs)
-    Pod.new!(%{name: name, network: :none, containers: [container]})
+    Pod.new!(Map.merge(%{name: name, network: :none, containers: [container]}, pod_attrs))
   end
 
   test "brings a pod to running with its rootfs, network, and cgroup limits", %{deck: deck} do
@@ -78,25 +73,43 @@ defmodule Tank.RuntimeTest do
     assert reason == {:shutdown, {:workload_signaled, 9}}
   end
 
-  test "a non-zero workload exit stops under a :shutdown reason (no crash report)" do
+  test "a non-zero workload exit stops under a :shutdown reason (no crash report)", %{deck: deck} do
     # The workload ending is an expected outcome, not a Runtime crash, so the
     # GenServer stops under {:shutdown, _} — OTP logs no crash report — while the
     # reconciler still sees a non-:normal reason and restarts per policy.
     Process.flag(:trap_exit, true)
 
-    p = pod("rt-exit-code", %{command: ["/bin/sh", "-c", "exit 3"]}, %{restart: :never})
-    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
+    p = deck_pod("rt-exit-code", deck, %{command: ["/bin/exit", "3"]}, %{restart: :never})
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
     ref = Process.monitor(runtime)
 
     assert_receive {:DOWN, ^ref, :process, ^runtime, reason}, 15_000
     assert reason == {:shutdown, {:workload_exited, 3}}
   end
 
+  test "a workload that exits cleanly on SIGTERM stops :normal (graceful shape)", %{deck: deck} do
+    # await-sig: blocks until any signal, prints its details, exits 0 — the
+    # graceful-shutdown shape (vs rt-signal's uncatchable KILL above). The
+    # future drain hook's TERM should land pods here, not in :workload_signaled.
+    Process.flag(:trap_exit, true)
+
+    p = deck_pod("rt-graceful", deck, %{command: ["/bin/await-sig"]}, %{restart: :never})
+    {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
+    assert_receive {:tank, :running, host_pid}, 15_000
+    ref = Process.monitor(runtime)
+
+    {_, 0} = System.cmd("kill", ["-TERM", Integer.to_string(host_pid)])
+
+    assert_receive {:DOWN, ^ref, :process, ^runtime, :normal}, 15_000
+    assert_received {:tank, :exited, 0}
+  end
+
   describe "attach handoff (tty: true)" do
-    test "begin_attach hands off the main PTY; detach leaves the workload running" do
-      # /bin/cat as the main process: interactive, stays alive on a PTY.
-      p = pod("rt-attach", %{command: ["/bin/cat"], tty: true})
-      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
+    test "begin_attach hands off the main PTY; detach leaves the workload running", %{deck: deck} do
+      # The cat applet with no PATH echoes stdin: interactive, stays alive on
+      # a PTY — the /bin/cat main-process shape, no distro needed.
+      p = deck_pod("rt-attach", deck, %{command: ["/bin/cat"], tty: true})
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
       assert_receive {:tank, :running, _host_pid}, 15_000
 
       # Hand the session to this test; we become the owner of :pty_out.
@@ -113,9 +126,9 @@ defmodule Tank.RuntimeTest do
       GenServer.stop(runtime)
     end
 
-    test "a main process that exits during attach makes end_attach stop the runtime" do
-      p = pod("rt-attach-exit", %{command: ["/bin/cat"], tty: true}, %{restart: :never})
-      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
+    test "a main process that exits during attach makes end_attach stop the runtime", %{deck: deck} do
+      p = deck_pod("rt-attach-exit", deck, %{command: ["/bin/cat"], tty: true}, %{restart: :never})
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
       assert_receive {:tank, :running, _host_pid}, 15_000
 
       # The runtime stops abnormally below; trap its linked exit so it doesn't
@@ -148,16 +161,16 @@ defmodule Tank.RuntimeTest do
       GenServer.stop(runtime)
     end
 
-    test "a tty container's main process gets a default TERM (so readline works)" do
-      p = pod("rt-term", %{command: ["/bin/sh"], tty: true})
-      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: Tank.TestImages.image_opts())
+    test "a tty container's main process gets a default TERM (so readline works)", %{deck: deck} do
+      # The deckhand REPL as the tty main process; its `env` command shows the
+      # environment the workload actually received — no shell expansion needed.
+      p = deck_pod("rt-term", deck, %{tty: true})
+      {:ok, runtime} = Runtime.start_link(p, owner: self(), image: deck.image_opts)
       assert_receive {:tank, :running, _host_pid}, 15_000
 
       {:ok, session} = Runtime.begin_attach(runtime, self())
-      # Ask the shell what TERM it sees. The command's output (not the echoed
-      # input, which shows the literal $TERM) carries the resolved value.
-      :ok = Linx.Process.pty_write(session, "echo MYTERM=$TERM\n")
-      assert pty_contains?("MYTERM=xterm", 5_000)
+      :ok = Linx.Process.pty_write(session, "env\n")
+      assert pty_contains?("TERM=xterm", 5_000)
 
       Runtime.end_attach(runtime)
       GenServer.stop(runtime)

@@ -15,9 +15,6 @@ defmodule Tank.TestImages do
 
   def cache, do: @cache
 
-  @doc "The alpine ref, for pod specs. Warm it first (`alpine!/0` in setup_all)."
-  def alpine_ref, do: @alpine
-
   @doc "The debian ref, for pod specs. Warm it first (`debian!/0` in setup_all)."
   def debian_ref, do: @debian
 
