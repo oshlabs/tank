@@ -79,8 +79,11 @@ defmodule TankWeb.WebE2ETest do
     |> form("form[phx-submit=exec]", %{cmd: "/bin/env"})
     |> render_submit()
 
+    # Terminal bytes ride push_event base64-encoded (a PTY stream isn't
+    # guaranteed valid UTF-8, and the event payload is JSON — see Gooey's
+    # Terminal component).
     assert_push_event(view, "term_output", %{data: data}, 15_000)
-    output = data <> collect_term_output(view)
+    output = Base.decode64!(data) <> collect_term_output(view)
     assert output =~ "PATH="
     # The applet ran to completion: the session-ended banner followed.
     assert output =~ "session ended"
@@ -89,7 +92,7 @@ defmodule TankWeb.WebE2ETest do
     # output racing the hook's init, and for tab-switch remounts.
     view |> element("#term-webe2e") |> render_hook("term_ready", %{})
     assert_push_event(view, "term_output", %{data: replay}, 5_000)
-    replay = replay <> collect_term_output(view)
+    replay = Base.decode64!(replay) <> collect_term_output(view)
     assert replay =~ "PATH="
     assert replay =~ "session ended"
 
@@ -106,7 +109,7 @@ defmodule TankWeb.WebE2ETest do
   # Drain queued term_output push_events into one string.
   defp collect_term_output(view, acc \\ "") do
     assert_push_event(view, "term_output", %{data: data}, 5_000)
-    collect_term_output(view, acc <> data)
+    collect_term_output(view, acc <> Base.decode64!(data))
   rescue
     ExUnit.AssertionError -> acc
   end
