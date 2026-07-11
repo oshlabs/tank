@@ -476,6 +476,7 @@ defmodule TankWeb.PodLive.Show do
             window_ms={chart_window()}
             rate_hint_ms={stats_interval()}
             draw_hz={15}
+            curve="smooth"
             title="CPU"
             series={[%{id: "cpu", label: "CPU", data: []}]}
             y_axis={%{min: 0, unit: "%"}}
@@ -490,6 +491,7 @@ defmodule TankWeb.PodLive.Show do
             window_ms={chart_window()}
             rate_hint_ms={stats_interval()}
             draw_hz={15}
+            curve="smooth"
             title="Memory"
             series={[%{id: "mem", label: "Memory", data: []}]}
             y_axis={%{min: 0, format: "si"}}
