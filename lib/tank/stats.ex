@@ -74,7 +74,9 @@ defmodule Tank.Stats do
 
   @doc """
   Oldest-first history for `pod`. `window: ms` picks the resolution: raw
-  samples while the raw ring covers the window, coarse otherwise.
+  samples while the raw ring covers the window, coarse otherwise. A pod too
+  young to have folded a coarse bucket falls back to the raw ring rather
+  than answering an empty history.
   """
   @spec history(String.t(), keyword()) :: [sample()]
   def history(pod, opts \\ []) when is_binary(pod) do
@@ -83,10 +85,12 @@ defmodule Tank.Stats do
 
     resolution = if window <= cfg.interval * cfg.raw_cap, do: :raw, else: :coarse
     cutoff = DateTime.add(DateTime.utc_now(), -window, :millisecond)
+    in_window = fn samples -> Enum.filter(samples, &(DateTime.compare(&1.at, cutoff) != :lt)) end
 
-    @table
-    |> Ring.samples(pod, resolution)
-    |> Enum.filter(&(DateTime.compare(&1.at, cutoff) != :lt))
+    case in_window.(Ring.samples(@table, pod, resolution)) do
+      [] when resolution == :coarse -> in_window.(Ring.samples(@table, pod, :raw))
+      samples -> samples
+    end
   rescue
     ArgumentError -> []
   end

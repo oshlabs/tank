@@ -260,6 +260,11 @@ defmodule TankWeb.PodLive.Show do
     end
   end
 
+  # In HEEx, @name is an assign — expose the window attrs to the template
+  # through functions so seed and stream share one definition.
+  defp spark_window, do: @spark_window
+  defp chart_window, do: @chart_window
+
   defp seed_chart(name, id) do
     {window, metric} =
       case id do
@@ -274,7 +279,9 @@ defmodule TankWeb.PodLive.Show do
             value = metric_value(s, metric),
             do: [DateTime.to_unix(s.at, :millisecond), value]
 
-      send_update(Chart, id: id, set_series: [%{id: metric, data: points}])
+      # Map form: patch the existing series' data in place (the list form
+      # replaces the series list wholesale — labels/colors would be lost).
+      send_update(Chart, id: id, set_series: %{id: metric, data: points})
     end
   end
 
@@ -387,7 +394,7 @@ defmodule TankWeb.PodLive.Show do
               id="spark-cpu"
               type="sparkline"
               streaming?
-              window_ms={120_000}
+              window_ms={spark_window()}
               series={[%{id: "cpu", data: []}]}
               class="w-24 h-8"
             />
@@ -400,7 +407,7 @@ defmodule TankWeb.PodLive.Show do
               id="spark-mem"
               type="sparkline"
               streaming?
-              window_ms={120_000}
+              window_ms={spark_window()}
               series={[%{id: "mem", data: []}]}
               class="w-24 h-8"
             />
@@ -413,7 +420,7 @@ defmodule TankWeb.PodLive.Show do
               id="spark-rx"
               type="sparkline"
               streaming?
-              window_ms={120_000}
+              window_ms={spark_window()}
               series={[%{id: "rx", data: []}]}
               class="w-24 h-8"
             />
@@ -426,7 +433,7 @@ defmodule TankWeb.PodLive.Show do
               id="spark-tx"
               type="sparkline"
               streaming?
-              window_ms={120_000}
+              window_ms={spark_window()}
               series={[%{id: "tx", data: []}]}
               class="w-24 h-8"
             />
@@ -454,7 +461,7 @@ defmodule TankWeb.PodLive.Show do
             id="chart-cpu"
             type="area"
             streaming?
-            window_ms={300_000}
+            window_ms={chart_window()}
             title="CPU"
             series={[%{id: "cpu", label: "CPU", data: []}]}
             y_axis={%{min: 0, unit: "%"}}
@@ -466,7 +473,7 @@ defmodule TankWeb.PodLive.Show do
             id="chart-mem"
             type="area"
             streaming?
-            window_ms={300_000}
+            window_ms={chart_window()}
             title="Memory"
             series={[%{id: "mem", label: "Memory", data: []}]}
             y_axis={%{min: 0, format: "si"}}

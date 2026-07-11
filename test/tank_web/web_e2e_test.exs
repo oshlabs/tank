@@ -66,6 +66,13 @@ defmodule TankWeb.WebE2ETest do
     # The stats sampler feeds the tiles (memory shows up as MiB/KiB).
     assert render_eventually(view, "iB", 10_000)
 
+    # --- overview charts: a hook that says ready is seeded from the ring ---
+    # (charts remount empty on tab switches; the ready event pulls history).
+    # Memory: present from the very first sample — cpu_percent is a rate and
+    # needs a second sample, so the cpu seed may legitimately still be empty.
+    view |> element("[id^='chart-mem-'][phx-hook]") |> render_hook("chart_ready", %{})
+    assert_push_event(view, "chart_series", %{series: [%{data: [_ | _]}]}, 5_000)
+
     # --- logs: the viewer replays the captured ring on hook-ready ----------
     view |> element("nav a", "Logs") |> render_click()
     view |> element("#logs-webe2e") |> render_hook("lv_ready", %{})
