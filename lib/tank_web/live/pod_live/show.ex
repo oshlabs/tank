@@ -530,7 +530,7 @@ defmodule TankWeb.PodLive.Show do
         <.live_component
           module={Gooey.Components.Terminal}
           id={term_id(@name)}
-          class={["h-[60vh] w-full", @session == nil && "opacity-40"]}
+          class={["h-[60vh] w-full", @session == nil && "opacity-70"]}
         />
       </section>
 

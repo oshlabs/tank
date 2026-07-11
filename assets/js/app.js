@@ -7,7 +7,7 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/tank"
 import topbar from "../vendor/topbar"
-import {Hooks as GooeyHooks, initGooeyFx} from "../../../gooey/assets/js/gooey"
+import {Hooks as GooeyHooks} from "../../../gooey/assets/js/gooey"
 import {GooeyChart} from "../../../gooey/assets/js/hooks/chart"
 import {GooeyDataTable} from "../../../gooey/assets/js/hooks/data_table"
 import {GooeyTerminal} from "../../../gooey/assets/js/hooks/terminal"
@@ -39,9 +39,9 @@ window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
 
 liveSocket.connect()
 
-// Theme ambient effects (the tank aquarium) — lazy-loaded per active theme,
-// guarded by reduced-motion / FX-pause / background-tab.
-initGooeyFx()
+// Theme ambient effects (the tank aquarium) stay off: the WebGL water and
+// 30fps plant canvas cost real CPU behind the mostly-opaque screens. To bring
+// the fish back, import initGooeyFx from gooey.js and call it here.
 
 // Expose for web console debug: liveSocket.enableDebug(), etc.
 window.liveSocket = liveSocket
