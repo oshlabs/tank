@@ -262,6 +262,10 @@ defmodule TankWeb.PodLive.Show do
 
   # In HEEx, @name is an assign — expose the window attrs to the template
   # through functions so seed and stream share one definition.
+  # The sampler's tick — the charts' rate hint, so the smooth draw's
+  # interpolation spans exactly one sample interval.
+  defp stats_interval, do: Tank.Stats.config().interval
+
   defp spark_window, do: @spark_window
   defp chart_window, do: @chart_window
 
@@ -395,6 +399,8 @@ defmodule TankWeb.PodLive.Show do
               type="sparkline"
               streaming?
               window_ms={spark_window()}
+              rate_hint_ms={stats_interval()}
+              draw_hz={30}
               series={[%{id: "cpu", data: []}]}
               class="w-24 h-8"
             />
@@ -408,6 +414,8 @@ defmodule TankWeb.PodLive.Show do
               type="sparkline"
               streaming?
               window_ms={spark_window()}
+              rate_hint_ms={stats_interval()}
+              draw_hz={30}
               series={[%{id: "mem", data: []}]}
               class="w-24 h-8"
             />
@@ -421,6 +429,8 @@ defmodule TankWeb.PodLive.Show do
               type="sparkline"
               streaming?
               window_ms={spark_window()}
+              rate_hint_ms={stats_interval()}
+              draw_hz={30}
               series={[%{id: "rx", data: []}]}
               class="w-24 h-8"
             />
@@ -434,6 +444,8 @@ defmodule TankWeb.PodLive.Show do
               type="sparkline"
               streaming?
               window_ms={spark_window()}
+              rate_hint_ms={stats_interval()}
+              draw_hz={30}
               series={[%{id: "tx", data: []}]}
               class="w-24 h-8"
             />
@@ -462,6 +474,8 @@ defmodule TankWeb.PodLive.Show do
             type="area"
             streaming?
             window_ms={chart_window()}
+            rate_hint_ms={stats_interval()}
+            draw_hz={30}
             title="CPU"
             series={[%{id: "cpu", label: "CPU", data: []}]}
             y_axis={%{min: 0, unit: "%"}}
@@ -474,6 +488,8 @@ defmodule TankWeb.PodLive.Show do
             type="area"
             streaming?
             window_ms={chart_window()}
+            rate_hint_ms={stats_interval()}
+            draw_hz={30}
             title="Memory"
             series={[%{id: "mem", label: "Memory", data: []}]}
             y_axis={%{min: 0, format: "si"}}
