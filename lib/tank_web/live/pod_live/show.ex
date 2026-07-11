@@ -86,8 +86,13 @@ defmodule TankWeb.PodLive.Show do
     push_metric("spark-mem", "mem", t, sample.memory_bytes)
     push_metric("spark-rx", "rx", t, sample.rx_bytes_per_sec)
     push_metric("spark-tx", "tx", t, sample.tx_bytes_per_sec)
-    push_metric("chart-cpu", "cpu", t, sample.cpu_percent)
-    push_metric("chart-mem", "mem", t, sample.memory_bytes)
+
+    # The big charts exist only on the overview tab; a send_update to an
+    # unmounted component logs a debug line per sample from any other tab.
+    if socket.assigns.live_action == :overview do
+      push_metric("chart-cpu", "cpu", t, sample.cpu_percent)
+      push_metric("chart-mem", "mem", t, sample.memory_bytes)
+    end
 
     {:noreply, assign(socket, sample: sample)}
   end
