@@ -400,7 +400,7 @@ defmodule TankWeb.PodLive.Show do
               streaming?
               window_ms={spark_window()}
               rate_hint_ms={stats_interval()}
-              draw_hz={30}
+              draw_hz={15}
               series={[%{id: "cpu", data: []}]}
               class="w-24 h-8"
             />
@@ -415,7 +415,7 @@ defmodule TankWeb.PodLive.Show do
               streaming?
               window_ms={spark_window()}
               rate_hint_ms={stats_interval()}
-              draw_hz={30}
+              draw_hz={15}
               series={[%{id: "mem", data: []}]}
               class="w-24 h-8"
             />
@@ -430,7 +430,7 @@ defmodule TankWeb.PodLive.Show do
               streaming?
               window_ms={spark_window()}
               rate_hint_ms={stats_interval()}
-              draw_hz={30}
+              draw_hz={15}
               series={[%{id: "rx", data: []}]}
               class="w-24 h-8"
             />
@@ -445,7 +445,7 @@ defmodule TankWeb.PodLive.Show do
               streaming?
               window_ms={spark_window()}
               rate_hint_ms={stats_interval()}
-              draw_hz={30}
+              draw_hz={15}
               series={[%{id: "tx", data: []}]}
               class="w-24 h-8"
             />
@@ -475,7 +475,7 @@ defmodule TankWeb.PodLive.Show do
             streaming?
             window_ms={chart_window()}
             rate_hint_ms={stats_interval()}
-            draw_hz={30}
+            draw_hz={15}
             title="CPU"
             series={[%{id: "cpu", label: "CPU", data: []}]}
             y_axis={%{min: 0, unit: "%"}}
@@ -489,7 +489,7 @@ defmodule TankWeb.PodLive.Show do
             streaming?
             window_ms={chart_window()}
             rate_hint_ms={stats_interval()}
-            draw_hz={30}
+            draw_hz={15}
             title="Memory"
             series={[%{id: "mem", label: "Memory", data: []}]}
             y_axis={%{min: 0, format: "si"}}
