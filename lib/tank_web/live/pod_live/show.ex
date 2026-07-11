@@ -479,7 +479,7 @@ defmodule TankWeb.PodLive.Show do
             curve="smooth"
             title="CPU"
             series={[%{id: "cpu", label: "CPU", data: []}]}
-            y_axis={%{min: 0, unit: "%"}}
+            y_axis={%{min: 0, max: 100, unit: "%"}}
             x_axis={%{type: "time", format: "clock"}}
             class="h-56"
           />
