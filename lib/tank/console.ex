@@ -34,6 +34,8 @@ defmodule Tank.Console do
   in `Tank.logs/2`.
   """
 
+  require Logger
+
   alias Tank.{Reconciler, Runtime}
   alias Tank.Console.Session
 
@@ -119,15 +121,40 @@ defmodule Tank.Console do
   end
 
   @doc false
+  # auto_proceed: false — the entered process parks at Linx's checkpoint so
+  # the caller can put it into the pod's cgroup *before* it execs (accounting
+  # and limits apply to exec'd sessions, docker-exec style). Every caller must
+  # join_pod_cgroup/2 + proceed/1 on {:linx_process, :ready, host_pid}.
   def enter_opts(ctx, argv, opts) do
     [
       argv: argv,
       stdio: :pty,
-      auto_proceed: true,
+      auto_proceed: false,
       cwd: Keyword.get(opts, :cwd, ctx.working_dir),
       env: exec_env(ctx.env, Keyword.get(opts, :env, []))
     ]
   end
+
+  @doc false
+  # Put an entered (exec'd) process into the pod's cgroup, pre-exec. A pod
+  # without a cgroup already "runs unaccounted" (see Tank.Runtime.Limits) —
+  # its execs then do too; a failed join is only ever loud, never fatal.
+  def join_pod_cgroup(%{cgroup: cgroup}, host_pid) when is_binary(cgroup) do
+    case Linx.Cgroup.add_process(cgroup, host_pid) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Tank.Console: exec pid #{host_pid} not joined to #{cgroup} " <>
+            "(#{inspect(reason)}); it runs unaccounted and uncapped"
+        )
+
+        :ok
+    end
+  end
+
+  def join_pod_cgroup(_ctx, _host_pid), do: :ok
 
   # The container's env, a default TERM when it set none (for a usable shell),
   # then the caller's :env overrides merged on top -- last writer per key wins.

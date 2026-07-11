@@ -50,6 +50,30 @@ defmodule Tank.ConsoleE2ETest do
     end
   end
 
+  test "exec joins the pod's cgroup — accounted and capped like the workload", %{
+    reconciler: r,
+    deck: deck
+  } do
+    keepalive_pid = start_pod(r, deck, "cg")
+
+    {:ok, session} = Console.exec("cg", ["/bin/deckhand"])
+
+    # The banner proves the exec'd process is past execve — which the session
+    # only allows after joining the cgroup (checkpoint-ordered, no race).
+    assert_receive {:tank_console, ^session, {:data, _banner}}, 20_000
+
+    procs =
+      "/sys/fs/cgroup/tank/cg/cgroup.procs"
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&String.to_integer/1)
+
+    assert keepalive_pid in procs
+    assert length(procs) >= 2, "exec'd process missing from the pod cgroup: #{inspect(procs)}"
+
+    :ok = Console.close(session)
+  end
+
   test "exec: a byte-stream shell session — write, read, resize, exit", %{
     reconciler: r,
     deck: deck

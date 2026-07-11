@@ -210,8 +210,26 @@ defmodule Tank do
       when is_binary(pod_name) and is_list(argv) and argv != [] do
     with {:ok, ctx} <- Tank.Console.resolve_exec_context(pod_name),
          {:ok, session} <-
-           Linx.Process.enter(ctx.host_pid, Tank.Console.enter_opts(ctx, argv, opts)) do
+           Linx.Process.enter(ctx.host_pid, Tank.Console.enter_opts(ctx, argv, opts)),
+         :ok <- proceed_in_pod_cgroup(session, ctx) do
       tty_attach(session)
+    end
+  end
+
+  # The entered process parks at Linx's checkpoint (enter_opts sets
+  # auto_proceed: false): join the pod's cgroup, then let it exec — the pod's
+  # accounting and limits cover the exec from its first instruction. The web
+  # path does the same in Tank.Console.Session.
+  defp proceed_in_pod_cgroup(session, ctx) do
+    receive do
+      {:linx_process, :ready, host_pid} ->
+        Tank.Console.join_pod_cgroup(ctx, host_pid)
+        Linx.Process.proceed(session)
+
+      {:linx_process, :error, errno, stage} ->
+        {:error, {errno, stage}}
+    after
+      15_000 -> {:error, :enter_timeout}
     end
   end
 

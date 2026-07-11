@@ -385,7 +385,11 @@ defmodule Tank.Runtime do
     do: {:reply, {:error, :not_running}, state}
 
   def handle_call(:exec_context, _from, %{host_pid: pid} = state),
-    do: {:reply, {:ok, %{host_pid: pid, env: state.env, working_dir: state.working_dir}}, state}
+    do:
+      {:reply,
+       {:ok,
+        %{host_pid: pid, env: state.env, working_dir: state.working_dir, cgroup: state.cgroup}},
+       state}
 
   def handle_call({:begin_attach, _attacher}, _from, %{attacher: current} = state)
       when is_pid(current) do

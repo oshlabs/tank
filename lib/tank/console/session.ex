@@ -24,7 +24,7 @@ defmodule Tank.Console.Session do
 
     with {:ok, ctx} <- Console.resolve_exec_context(pod),
          {:ok, workload} <- Workload.enter(ctx.host_pid, Console.enter_opts(ctx, argv, opts)) do
-      {:ok, ready(:exec, pod, workload, nil, consumer, opts)}
+      {:ok, Map.put(ready(:exec, pod, workload, nil, consumer, opts), :ctx, ctx)}
     else
       {:error, reason} -> {:stop, reason}
     end
@@ -79,6 +79,16 @@ defmodule Tank.Console.Session do
     # fires while the runtime owns the session, which it doesn't right now.
     if state.mode == :attach, do: Runtime.tee_pty(state.runtime, bytes)
     {:noreply, deliver(state, bytes)}
+  end
+
+  # The entered process is parked at Linx's checkpoint: join the pod's cgroup
+  # first, then let it exec — accounting and limits cover the exec'd session
+  # from its first instruction. A failed proceed means the workload already
+  # died; its terminal :linx_process message finishes the session.
+  def handle_info({:linx_process, :ready, host_pid}, %{mode: :exec} = state) do
+    Console.join_pod_cgroup(state.ctx, host_pid)
+    _ = Workload.proceed(state.workload)
+    {:noreply, state}
   end
 
   def handle_info({:linx_process, :exited, code}, state),
